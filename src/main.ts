@@ -53,6 +53,8 @@ type Hero = Vec & {
   label: string;
   lockedTarget: Kitten | null;
   activePower: ActivePower | null;
+  // Looping audio that plays for the duration of the active power.
+  powerLoop: HTMLAudioElement | null;
 };
 
 // Power-ups -- each character has a unique ability triggered by picking up
@@ -65,6 +67,8 @@ type Pig = Vec & {
   vy: number;
   wanderTimer: number;
   bob: number;
+  // Performance.now() ms when this pig should oink next.
+  nextOinkAt: number;
 };
 
 type BitsyTrailPower = {
@@ -197,9 +201,11 @@ const BITSY_TRAIL_LIFETIME_MS = 1500;
 const GINNY_CLAWS_TOTAL = 6;
 const GINNY_CLAWS_INTERVAL_MS = 1500;
 const GINNY_CLAW_LIFETIME_MS = 2000;
-const GINNY_CLAW_RADIUS = 240; // 3x bigger reach
+const GINNY_CLAW_RADIUS = 288; // 3x bigger reach + 20%
 const BUDDY_DURATION_MS = 10_000;
 const BUDDY_SCALE = 2.5;
+// Match the visible blitzball radius so the hitbox feels right.
+const BUDDY_CATCH_RADIUS = 92;
 const SPARKS_DURATION_MS = 20_000;
 const SPARKS_PIG_COUNT = 5;
 
@@ -292,6 +298,8 @@ const GAME_KEYS = new Set([
   "enter", " ", "1", "2", "escape",
 ]);
 window.addEventListener("keydown", (e) => {
+  // First keypress unlocks audio and starts the looping theme song.
+  ensureThemeMusic();
   const k = e.key.toLowerCase();
   if (!keys.has(k)) justPressed.add(k);
   keys.add(k);
@@ -325,6 +333,78 @@ function inputForControls(c: Controls): Vec {
 }
 
 // --- Audio ---------------------------------------------------------------
+
+import themeSongUrl from "./assets/audio/game-intro-theme-song.mp3";
+import bitsyPowerupUrl from "./assets/audio/bitsy-powerup.mp3";
+import bitsySpeedUrl from "./assets/audio/bitsy-speed.mp3";
+import ginnyPowerupUrl from "./assets/audio/ginny-powerup.mp3";
+import ginnyClawsUrl from "./assets/audio/ginny-claws.mp3";
+import buddyPowerupUrl from "./assets/audio/buddy-powerup.mp3";
+import buddyBounceUrl from "./assets/audio/buddy-bounce.mp3";
+import sparksPowerupUrl from "./assets/audio/sparks-powerup.mp3";
+import pigOink1Url from "./assets/audio/sparks-pig-oink1.mp3";
+import pigOink2Url from "./assets/audio/sparks-pig-oink2.mp3";
+import pigSqueakUrl from "./assets/audio/pig-squeak.mp3";
+
+const POWERUP_SOUND: Record<string, string> = {
+  bitsy: bitsyPowerupUrl,
+  ginny: ginnyPowerupUrl,
+  buddy: buddyPowerupUrl,
+  sparks: sparksPowerupUrl,
+};
+const POWER_LOOP_SOUND: Record<string, string | undefined> = {
+  bitsy: bitsySpeedUrl,
+  ginny: ginnyClawsUrl,
+  buddy: buddyBounceUrl,
+  // Sparks has no character loop — pigs each oink on their own schedule.
+};
+const PIG_OINKS: string[] = [pigOink1Url, pigOink2Url, pigSqueakUrl];
+
+const POWERUP_VOLUME = 0.45;
+const POWER_LOOP_VOLUME = 0.22;
+const PIG_VOLUME = 0.3;
+const THEME_VOLUME = 0.25;
+
+let themeMusic: HTMLAudioElement | null = null;
+function ensureThemeMusic(): void {
+  if (themeMusic) return;
+  const a = new Audio(themeSongUrl);
+  a.loop = true;
+  a.volume = THEME_VOLUME;
+  // Browsers block autoplay until user gesture; the first keydown calls this.
+  a.play().catch(() => {});
+  themeMusic = a;
+}
+function pauseThemeMusic(): void {
+  themeMusic?.pause();
+}
+function resumeThemeMusic(): void {
+  if (!themeMusic) return;
+  // .play() resumes from paused position because we never set currentTime.
+  themeMusic.play().catch(() => {});
+}
+
+function playOneShot(src: string, volume = POWERUP_VOLUME): void {
+  const a = new Audio(src);
+  a.volume = volume;
+  a.play().catch(() => { /* ignored — autoplay restrictions etc */ });
+}
+function startLoopAudio(src: string, volume = POWER_LOOP_VOLUME): HTMLAudioElement {
+  const a = new Audio(src);
+  a.volume = volume;
+  a.loop = true;
+  a.play().catch(() => {});
+  return a;
+}
+function stopLoopAudio(a: HTMLAudioElement | null): void {
+  if (!a) return;
+  try {
+    a.pause();
+    a.currentTime = 0;
+  } catch {
+    // ignore
+  }
+}
 
 let audioCtx: AudioContext | null = null;
 function audio(): AudioContext {
@@ -473,6 +553,7 @@ function startGame(): void {
       label: `P${i + 1}`,
       lockedTarget: null,
       activePower: null,
+      powerLoop: null,
     });
   }
   score = 0;
@@ -484,6 +565,8 @@ function startGame(): void {
   nextPowerUpSpawnTime = performance.now() + POWERUP_FIRST_DELAY_MS;
   buildCity();
   spawnKittens();
+  // Theme song is for the menus; gameplay has its own ambient sounds.
+  pauseThemeMusic();
   state = "playing";
 }
 
@@ -498,6 +581,13 @@ function heroSpeedMultiplier(h: Hero): number {
 }
 function heroSizeMultiplier(h: Hero): number {
   return h.activePower?.kind === "buddy-grow" ? BUDDY_SCALE : 1;
+}
+
+function heroCatchRadius(h: Hero): number {
+  // Buddy's blitzball ignores sprite scale — the catch zone matches the
+  // visible orb instead so kittens get scooped at the edge of the ball.
+  if (h.activePower?.kind === "buddy-grow") return BUDDY_CATCH_RADIUS;
+  return HERO_RADIUS * heroSizeMultiplier(h);
 }
 
 function catchKitten(k: Kitten): void {
@@ -540,12 +630,25 @@ function activatePower(p: Hero): void {
       };
       break;
   }
-  // pickup chime
-  blip(1500, 0.1, "triangle", 0.1);
-  setTimeout(() => blip(2200, 0.16, "triangle", 0.08), 80);
+  // One-shot character announcement when the power activates.
+  const oneShot = POWERUP_SOUND[p.character.id];
+  if (oneShot) playOneShot(oneShot);
+  // Loop sound that runs for the duration of the power, if any.
+  const loopUrl = POWER_LOOP_SOUND[p.character.id];
+  if (loopUrl) {
+    stopLoopAudio(p.powerLoop);
+    p.powerLoop = startLoopAudio(loopUrl);
+  }
+}
+
+function endPower(p: Hero): void {
+  p.activePower = null;
+  stopLoopAudio(p.powerLoop);
+  p.powerLoop = null;
 }
 
 function spawnPigs(spawner: Hero, count: number): Pig[] {
+  const now = performance.now();
   const pigs: Pig[] = [];
   for (let i = 0; i < count; i++) {
     const a = (Math.PI * 2 * i) / count;
@@ -556,6 +659,8 @@ function spawnPigs(spawner: Hero, count: number): Pig[] {
       vy: Math.sin(a) * 1.5,
       wanderTimer: 30 + Math.random() * 60,
       bob: Math.random() * Math.PI * 2,
+      // Stagger first oinks across 0.3-2.5s so they don't all squeak at once.
+      nextOinkAt: now + 300 + Math.random() * 2200,
     });
   }
   return pigs;
@@ -653,6 +758,8 @@ function updateCharSelect(): void {
 function updatePlaying(): void {
   if (consumeJust("escape")) {
     stopBeamSound();
+    for (const p of players) endPower(p);
+    resumeThemeMusic();
     state = "mode-select";
     return;
   }
@@ -708,7 +815,7 @@ function updatePlaying(): void {
           }
         }
       }
-      if (expired && ap.trail.length === 0) p.activePower = null;
+      if (expired && ap.trail.length === 0) endPower(p);
     } else if (ap.kind === "ginny-claws") {
       if (ap.clawsRemaining > 0 && now >= ap.nextClawAt) {
         ap.swipes.push({ x: p.x, y: p.y, startTime: now, lifetime: GINNY_CLAW_LIFETIME_MS });
@@ -719,26 +826,30 @@ function updatePlaying(): void {
         setTimeout(() => blip(800, 0.06, "sawtooth", 0.05), 30);
       }
       ap.swipes = ap.swipes.filter((s) => now - s.startTime < s.lifetime);
-      // Slash zone: horizontal rectangle matching the rendered bars.
+      // Slash zone: circular cover roughly matching the X's bounding area.
       for (const swipe of ap.swipes) {
         for (const k of kittens) {
           if (k.saved) continue;
-          const dx = Math.abs(k.x - swipe.x);
-          const dy = Math.abs(k.y - swipe.y);
-          if (dx < GINNY_CLAW_RADIUS + KITTEN_RADIUS && dy < 36 + KITTEN_RADIUS) {
+          if (Math.hypot(k.x - swipe.x, k.y - swipe.y) < GINNY_CLAW_RADIUS + KITTEN_RADIUS) {
             catchKitten(k);
           }
         }
       }
       if (ap.clawsRemaining === 0 && ap.swipes.length === 0 && expired) {
-        p.activePower = null;
+        endPower(p);
       }
     } else if (ap.kind === "buddy-grow") {
       // Catch handled in the main rescue check (size multiplier expands reach).
-      if (expired) p.activePower = null;
+      if (expired) endPower(p);
     } else if (ap.kind === "sparks-pigs") {
       for (const pig of ap.pigs) {
         pig.bob += 0.18;
+        if (now >= pig.nextOinkAt) {
+          const url = PIG_OINKS[Math.floor(Math.random() * PIG_OINKS.length)];
+          playOneShot(url, PIG_VOLUME);
+          // Random 2-4s interval, with a tiny extra jitter so they don't sync up.
+          pig.nextOinkAt = now + 2000 + Math.random() * 2000 + (Math.random() * 100);
+        }
         pig.wanderTimer--;
         if (pig.wanderTimer <= 0) {
           const angle = Math.random() * Math.PI * 2;
@@ -762,7 +873,7 @@ function updatePlaying(): void {
           }
         }
       }
-      if (expired) p.activePower = null;
+      if (expired) endPower(p);
     }
   }
 
@@ -836,11 +947,12 @@ function updatePlaying(): void {
     k.vy = km.vy;
   }
 
-  // Rescue: any player who touches a kitten saves it (Buddy's grown size extends reach).
+  // Rescue: any player who touches a kitten saves it (Buddy's blitzball
+  // dramatically expands reach to match the visible orb).
   for (const k of kittens) {
     if (k.saved) continue;
     for (const p of players) {
-      const heroR = HERO_RADIUS * heroSizeMultiplier(p);
+      const heroR = heroCatchRadius(p);
       if (Math.hypot(k.x - p.x, k.y - p.y) < heroR + KITTEN_RADIUS - 8) {
         catchKitten(k);
         break;
@@ -1620,29 +1732,38 @@ function drawClawSwipe(s: ClawSwipe): void {
   const alpha = Math.pow(1 - t, 1.4);
   // Reach grows quickly to full extension, then holds.
   const reach = GINNY_CLAW_RADIUS * Math.min(1, t * 4);
-  // Vertical slash bars: 4 parallel lines spanning full width on both sides.
-  const bars = [-26, -9, 9, 26];
 
   ctx.save();
   ctx.translate(s.x, s.y);
 
+  // The X is two crossed diagonal slash sets. Each set is drawn in its own
+  // rotated frame using the same slab-and-bars pattern.
+  drawSlashStripe(reach, alpha, Math.PI / 4);  // \ diagonal
+  drawSlashStripe(reach, alpha, -Math.PI / 4); // / diagonal
+
+  ctx.restore();
+}
+
+function drawSlashStripe(reach: number, alpha: number, rotation: number): void {
+  ctx.save();
+  ctx.rotate(rotation);
+
   // Soft pink slab fills the space between the bars so it reads as a
-  // sweep rather than a few thin lines.
+  // continuous slash rather than a few thin lines.
   const slabGrad = ctx.createLinearGradient(-reach, 0, reach, 0);
-  slabGrad.addColorStop(0.0, `rgba(255, 90, 130, 0)`);
+  slabGrad.addColorStop(0.0, "rgba(255, 90, 130, 0)");
   slabGrad.addColorStop(0.2, `rgba(255, 130, 160, ${alpha * 0.45})`);
   slabGrad.addColorStop(0.5, `rgba(255, 150, 180, ${alpha * 0.6})`);
   slabGrad.addColorStop(0.8, `rgba(255, 130, 160, ${alpha * 0.45})`);
-  slabGrad.addColorStop(1.0, `rgba(255, 90, 130, 0)`);
+  slabGrad.addColorStop(1.0, "rgba(255, 90, 130, 0)");
   ctx.fillStyle = slabGrad;
-  ctx.fillRect(-reach, -36, reach * 2, 72);
+  ctx.fillRect(-reach, -32, reach * 2, 64);
 
-  // Shadow glow on bright slashes.
   ctx.shadowColor = `rgba(255, 80, 110, ${alpha})`;
   ctx.shadowBlur = 14;
 
+  const bars = [-22, -7, 7, 22];
   for (const y of bars) {
-    // Fat white core slash.
     ctx.strokeStyle = `rgba(255, 250, 250, ${alpha})`;
     ctx.lineWidth = 9;
     ctx.lineCap = "round";
@@ -1650,7 +1771,6 @@ function drawClawSwipe(s: ClawSwipe): void {
     ctx.moveTo(-reach, y);
     ctx.lineTo(reach, y);
     ctx.stroke();
-    // Pink edging.
     ctx.strokeStyle = `rgba(255, 90, 130, ${alpha})`;
     ctx.lineWidth = 3;
     ctx.beginPath();
