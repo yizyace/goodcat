@@ -254,11 +254,9 @@ function update(): void {
   hero.vy += (targetVy - hero.vy) * 0.35;
   if (Math.abs(hero.vx) > 0.05) hero.facing = hero.vx > 0 ? 1 : -1;
 
-  const moved = moveWithCollision(hero, hero.vx, hero.vy, HERO_RADIUS);
-  hero.x = moved.x;
-  hero.y = moved.y;
-  hero.vx = moved.vx;
-  hero.vy = moved.vy;
+  // Hero clips through buildings — only the screen edges stop her.
+  hero.x = Math.max(HERO_RADIUS, Math.min(W - HERO_RADIUS, hero.x + hero.vx));
+  hero.y = Math.max(HERO_RADIUS, Math.min(H - HERO_RADIUS, hero.y + hero.vy));
   hero.bounce += Math.hypot(hero.vx, hero.vy) * 0.08;
 
   // Kittens wander.
