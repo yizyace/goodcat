@@ -205,7 +205,7 @@ let isNight = false;
 let levelBannerUntil = 0;
 let burglar: CatBurglar | null = null;
 const BURGLAR_RADIUS = 26;
-const BURGLAR_BASE_SPEED = 1.6;
+const BURGLAR_BASE_SPEED = 2.4;
 const BURGLAR_INVULN_MS = 5_000;
 const BURGLAR_HITS_TO_CATCH = 3;
 
@@ -1111,20 +1111,22 @@ function updateBurglar(now: number): void {
   }
 
   burglar.wanderTimer--;
-  // Re-pick a heading periodically so movement isn't too predictable.
+  // Re-pick a heading often so movement is jumpy and erratic.
   if (burglar.wanderTimer <= 0) {
-    burglar.wanderTimer = 18 + Math.floor(Math.random() * 18);
+    burglar.wanderTimer = 5 + Math.floor(Math.random() * 12);
     const dx = burglar.x - nearest.x;
     const dy = burglar.y - nearest.y;
     const dl = Math.hypot(dx, dy) || 1;
-    // Mostly flee, plus a wide jitter so he zigzags.
-    const fleeWeight = 0.78;
+    // Strong randomness so he juke-and-jives instead of fleeing in a straight line.
+    // ~10% chance of a sudden burst in any direction (dash).
+    const dash = Math.random() < 0.1;
+    const fleeWeight = dash ? 0 : 0.4;
     const rx = Math.random() * 2 - 1;
     const ry = Math.random() * 2 - 1;
     const dirX = (dx / dl) * fleeWeight + rx * (1 - fleeWeight);
     const dirY = (dy / dl) * fleeWeight + ry * (1 - fleeWeight);
     const dl2 = Math.hypot(dirX, dirY) || 1;
-    const speed = burglarCurrentSpeed(burglar);
+    const speed = burglarCurrentSpeed(burglar) * (dash ? 1.6 : 1);
     burglar.vx = (dirX / dl2) * speed;
     burglar.vy = (dirY / dl2) * speed;
   }
@@ -1409,7 +1411,7 @@ function renderCharSelect(): void {
 }
 
 function renderPlaying(): void {
-  ctx.fillStyle = isNight ? "#0a1230" : "#cfeeff";
+  ctx.fillStyle = isNight ? "#16093a" : "#cfeeff";
   ctx.fillRect(0, 0, W, H);
   drawCity();
   if (isNight) drawNightOverlay();
@@ -1498,36 +1500,36 @@ function renderPlaying(): void {
 // --- Drawing helpers -----------------------------------------------------
 
 function drawNightOverlay(): void {
-  // Cool blue dim across the whole scene.
-  ctx.fillStyle = "rgba(15, 25, 60, 0.42)";
+  // Deep purple-blue dim across the scene.
+  ctx.fillStyle = "rgba(35, 18, 75, 0.62)";
   ctx.fillRect(0, 0, W, H);
   // Moon glow.
   const mx = W - 96;
   const my = 78;
-  const glow = ctx.createRadialGradient(mx, my, 8, mx, my, 140);
-  glow.addColorStop(0, "rgba(255, 248, 210, 0.45)");
-  glow.addColorStop(1, "rgba(255, 248, 210, 0)");
+  const glow = ctx.createRadialGradient(mx, my, 8, mx, my, 160);
+  glow.addColorStop(0, "rgba(255, 240, 220, 0.55)");
+  glow.addColorStop(1, "rgba(255, 240, 220, 0)");
   ctx.fillStyle = glow;
   ctx.beginPath();
-  ctx.arc(mx, my, 140, 0, Math.PI * 2);
+  ctx.arc(mx, my, 160, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = "rgba(255, 248, 210, 0.92)";
+  ctx.fillStyle = "rgba(255, 240, 220, 0.95)";
   ctx.beginPath();
   ctx.arc(mx, my, 24, 0, Math.PI * 2);
   ctx.fill();
-  // Slight crescent shadow on the moon.
-  ctx.fillStyle = "rgba(15, 25, 60, 0.35)";
+  // Crescent shadow on the moon — tinted purple to match overlay.
+  ctx.fillStyle = "rgba(35, 18, 75, 0.55)";
   ctx.beginPath();
   ctx.arc(mx + 8, my - 4, 22, 0, Math.PI * 2);
   ctx.fill();
-  // Twinkling stars in the upper portion of the canvas.
-  for (let i = 0; i < 40; i++) {
+  // Twinkling stars across the upper half.
+  for (let i = 0; i < 50; i++) {
     const x = (i * 137) % W;
-    const y = (i * 89) % Math.floor(H * 0.42);
-    const a = 0.35 + Math.sin(performance.now() / 800 + i) * 0.25;
-    ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+    const y = (i * 89) % Math.floor(H * 0.5);
+    const a = 0.45 + Math.sin(performance.now() / 800 + i) * 0.3;
+    ctx.fillStyle = `rgba(255, 235, 255, ${a})`;
     ctx.beginPath();
-    ctx.arc(x, y, 1.2, 0, Math.PI * 2);
+    ctx.arc(x, y, 1.4, 0, Math.PI * 2);
     ctx.fill();
   }
 }
