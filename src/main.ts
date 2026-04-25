@@ -27,6 +27,8 @@ type Kitten = Vec & {
   wiggle: number;
   // How long until the kitten picks a new wander direction.
   wanderTimer: number;
+  // Held in place by the hero's gravity pulse this frame.
+  held: boolean;
 };
 
 type Particle = Vec & {
@@ -132,6 +134,7 @@ function spawnKittens(): void {
       saved: false,
       wiggle: Math.random() * Math.PI * 2,
       wanderTimer: Math.random() * 60,
+      held: false,
     });
     placed++;
   }
@@ -207,12 +210,70 @@ function winFanfare(): void {
   notes.forEach((n, i) => setTimeout(() => blip(n, 0.18, "triangle", 0.1), i * 120));
 }
 
+// Sustained gravity-beam hum: low sawtooth + sine harmonic, gain modulated by a 6Hz LFO.
+let beamNodes:
+  | { mainGain: GainNode; oscs: OscillatorNode[]; lfo: OscillatorNode }
+  | null = null;
+function startBeamSound(): void {
+  if (beamNodes) return;
+  try {
+    const a = audio();
+    if (a.state === "suspended") a.resume();
+    const osc1 = a.createOscillator();
+    osc1.type = "triangle";
+    osc1.frequency.value = 110;
+    const osc2 = a.createOscillator();
+    osc2.type = "sine";
+    osc2.frequency.value = 165;
+    // Low-pass to round off any harshness.
+    const filter = a.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 600;
+    const mainGain = a.createGain();
+    mainGain.gain.setValueAtTime(0, a.currentTime);
+    mainGain.gain.linearRampToValueAtTime(0.012, a.currentTime + 0.15);
+    const lfo = a.createOscillator();
+    lfo.type = "sine";
+    lfo.frequency.value = 4;
+    const lfoDepth = a.createGain();
+    lfoDepth.gain.value = 0.005;
+    lfo.connect(lfoDepth);
+    lfoDepth.connect(mainGain.gain);
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(mainGain);
+    mainGain.connect(a.destination);
+    osc1.start();
+    osc2.start();
+    lfo.start();
+    beamNodes = { mainGain, oscs: [osc1, osc2], lfo };
+  } catch {
+    // best-effort
+  }
+}
+function stopBeamSound(): void {
+  if (!beamNodes) return;
+  try {
+    const a = audio();
+    const { mainGain, oscs, lfo } = beamNodes;
+    mainGain.gain.cancelScheduledValues(a.currentTime);
+    mainGain.gain.setValueAtTime(mainGain.gain.value, a.currentTime);
+    mainGain.gain.linearRampToValueAtTime(0, a.currentTime + 0.12);
+    for (const osc of oscs) osc.stop(a.currentTime + 0.14);
+    lfo.stop(a.currentTime + 0.14);
+  } catch {
+    // best-effort
+  }
+  beamNodes = null;
+}
+
 // --- Update --------------------------------------------------------------
 
 const HERO_SPEED = 3.4;
 const HERO_RADIUS = 22;
 const KITTEN_SPEED = 1.3; // markedly slower than the hero so the chase always succeeds
 const KITTEN_RADIUS = 22;
+const PULSE_RANGE = TILE * 3.2; // hero's gravity pulse: nearest kitten within this range freezes
 
 function moveWithCollision(
   pos: Vec,
@@ -259,10 +320,32 @@ function update(): void {
   hero.y = Math.max(HERO_RADIUS, Math.min(H - HERO_RADIUS, hero.y + hero.vy));
   hero.bounce += Math.hypot(hero.vx, hero.vy) * 0.08;
 
-  // Kittens wander.
+  // The hero's gravity pulse only locks onto the single nearest kitten in range.
+  let lockedTarget: Kitten | null = null;
+  let lockedDist = PULSE_RANGE;
+  for (const k of kittens) {
+    if (k.saved) continue;
+    const d = Math.hypot(k.x - hero.x, k.y - hero.y);
+    if (d < lockedDist) {
+      lockedDist = d;
+      lockedTarget = k;
+    }
+  }
+  if (lockedTarget) startBeamSound();
+  else stopBeamSound();
+
+  // Kittens wander — unless they're the one caught in the hero's gravity pulse.
   for (const k of kittens) {
     if (k.saved) continue;
     k.wiggle += 0.12;
+    k.held = k === lockedTarget;
+    if (k.held) {
+      k.vx = 0;
+      k.vy = 0;
+      // Reset wander timer so they pick a fresh direction the moment they're released.
+      k.wanderTimer = 0;
+      continue;
+    }
     k.wanderTimer--;
     if (k.wanderTimer <= 0) {
       // Pick a new direction. 25% chance to pause briefly.
@@ -590,8 +673,107 @@ function drawHero(): void {
   ctx.restore();
 }
 
+function drawGravityBeam(from: Vec, to: Vec): void {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1) return;
+  const angle = Math.atan2(dy, dx);
+
+  ctx.save();
+  ctx.translate(from.x, from.y);
+  ctx.rotate(angle);
+
+  const t = performance.now() / 180;
+  const freq = 0.085; // wavelength along the beam
+  const amp = 9;
+  const steps = Math.max(24, Math.floor(dist / 3));
+
+  // Soft outer halo down the spine of the beam.
+  const halo = ctx.createLinearGradient(0, 0, dist, 0);
+  halo.addColorStop(0.0, "rgba(170, 110, 255, 0.0)");
+  halo.addColorStop(0.2, "rgba(170, 110, 255, 0.35)");
+  halo.addColorStop(0.8, "rgba(170, 110, 255, 0.35)");
+  halo.addColorStop(1.0, "rgba(170, 110, 255, 0.0)");
+  ctx.strokeStyle = halo;
+  ctx.lineWidth = 18;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(dist, 0);
+  ctx.stroke();
+
+  // Glowing helix — uses canvas shadow to bloom each strand in purple.
+  ctx.shadowColor = "rgba(190, 110, 255, 0.95)";
+  ctx.shadowBlur = 14;
+
+  // Strand A.
+  ctx.strokeStyle = "rgba(214, 168, 255, 0.95)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const x = (i / steps) * dist;
+    const y = Math.sin(x * freq - t) * amp;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Strand B — π out of phase, slightly different shade.
+  ctx.strokeStyle = "rgba(168, 110, 240, 0.95)";
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const x = (i / steps) * dist;
+    const y = Math.sin(x * freq - t + Math.PI) * amp;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+
+  // Bright nodes where the strands cross (sin = 0 → x*freq − t = nπ).
+  const spacing = Math.PI / freq;
+  let firstCross = ((t % Math.PI) / freq);
+  if (firstCross < 0) firstCross += spacing;
+  for (let x = firstCross; x < dist; x += spacing) {
+    const pulse = 0.7 + Math.sin(t * 3 + x * 0.05) * 0.3;
+    ctx.fillStyle = `rgba(240, 215, 255, ${pulse})`;
+    ctx.beginPath();
+    ctx.arc(x, 0, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
 function drawKitten(k: Kitten): void {
   if (k.saved) return;
+
+  // Gravity-pulse aura — only when held by the hero's pulse field.
+  if (k.held) {
+    const t = performance.now() / 700;
+    // Two outward-traveling rings, offset by half a cycle.
+    for (const offset of [0, 0.5]) {
+      const phase = (t + offset) % 1;
+      const radius = 22 + phase * 30;
+      const alpha = (1 - phase) * 0.45;
+      ctx.strokeStyle = `rgba(255, 122, 184, ${alpha})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(k.x, k.y, radius, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    // Soft inner glow.
+    const glow = ctx.createRadialGradient(k.x, k.y, 0, k.x, k.y, 30);
+    glow.addColorStop(0, "rgba(255, 122, 184, 0.22)");
+    glow.addColorStop(1, "rgba(255, 122, 184, 0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(k.x, k.y, 30, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   ctx.save();
   // Face the way they're moving.
   const facing: 1 | -1 = k.vx < -0.05 ? -1 : 1;
@@ -738,6 +920,10 @@ function render(): void {
   ctx.fillStyle = "#cfeeff";
   ctx.fillRect(0, 0, W, H);
   drawCity();
+
+  // Beam to the held kitten (under the characters so endpoints sit on top).
+  const held = kittens.find((k) => k.held && !k.saved);
+  if (held) drawGravityBeam(hero, held);
 
   for (const k of kittens) drawKitten(k);
   drawHero();
