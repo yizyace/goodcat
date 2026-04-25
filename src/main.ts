@@ -228,7 +228,7 @@ const justPressed = new Set<string>();
 const GAME_KEYS = new Set([
   "arrowup", "arrowdown", "arrowleft", "arrowright",
   "w", "a", "s", "d",
-  "enter", " ", "1", "2",
+  "enter", " ", "1", "2", "escape",
 ]);
 window.addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
@@ -452,6 +452,18 @@ function isCharTaken(idx: number): boolean {
 }
 
 function updateCharSelect(): void {
+  if (consumeJust("escape")) {
+    if (charSelectingPlayer === 1 && p1Char) {
+      // Back to P1 pick, restoring P1's previous selection.
+      const prevIdx = CHARACTERS.indexOf(p1Char);
+      p1Char = null;
+      charSelectingPlayer = 0;
+      charSelectIdx = prevIdx >= 0 ? prevIdx : 0;
+    } else {
+      state = "mode-select";
+    }
+    return;
+  }
   let dir = 0;
   if (consumeJust("arrowright") || consumeJust("d")) dir = 1;
   else if (consumeJust("arrowleft") || consumeJust("a")) dir = -1;
@@ -483,6 +495,11 @@ function updateCharSelect(): void {
 }
 
 function updatePlaying(): void {
+  if (consumeJust("escape")) {
+    stopBeamSound();
+    state = "mode-select";
+    return;
+  }
   // Per-player movement.
   for (const p of players) {
     const want = inputForControls(p.controls);
@@ -797,7 +814,7 @@ function renderCharSelect(): void {
   }
   ctx.fillStyle = "#fff";
   ctx.font = "20px system-ui";
-  ctx.fillText("← → to choose  ·  ENTER to lock in", W / 2, H - 50);
+  ctx.fillText("← → to choose  ·  ENTER to lock in  ·  ESC to go back", W / 2, H - 50);
 }
 
 function renderPlaying(): void {
