@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Super Ginger — Kitty Rescue!</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #2a1d4a;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #fff;
+        overflow: hidden;
+        user-select: none;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      canvas {
+        background: #6dd2ff;
+        display: block;
+        max-width: 100vw;
+        max-height: 100vh;
+        image-rendering: pixelated;
+        box-shadow: 0 0 40px rgba(0, 0, 0, 0.4);
+        touch-action: none;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        font-size: 28px;
+        font-weight: 800;
+        text-shadow: 2px 2px 0 #000;
+        letter-spacing: 1px;
+        pointer-events: none;
+      }
+      #title {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        font-size: 22px;
+        font-weight: 800;
+        color: #ffd0e8;
+        text-shadow: 2px 2px 0 #6b1a4d;
+        pointer-events: none;
+      }
+      #help {
+        position: fixed;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 18px;
+        font-weight: 700;
+        text-shadow: 1px 1px 0 #000;
+        background: rgba(0, 0, 0, 0.35);
+        padding: 6px 14px;
+        border-radius: 14px;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game" width="960" height="640"></canvas>
+    </div>
+    <div id="hud">🐾 Saved: <span id="score">0</span></div>
+    <div id="title">Super Ginger 🦸‍♀️</div>
+    <div id="help">Use the arrow keys to move • Catch the kittens for a hug!</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
