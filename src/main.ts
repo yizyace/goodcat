@@ -52,7 +52,49 @@ type Hero = Vec & {
   controls: Controls;
   label: string;
   lockedTarget: Kitten | null;
+  activePower: ActivePower | null;
 };
+
+// Power-ups -- each character has a unique ability triggered by picking up
+// the glowing item that spawns every 30 seconds.
+
+type TrailPoint = Vec & { time: number };
+type ClawSwipe = { x: number; y: number; startTime: number; lifetime: number };
+type Pig = Vec & {
+  vx: number;
+  vy: number;
+  wanderTimer: number;
+  bob: number;
+};
+
+type BitsyTrailPower = {
+  kind: "bitsy-trail";
+  endsAt: number;
+  trail: TrailPoint[];
+};
+type GinnyClawsPower = {
+  kind: "ginny-claws";
+  endsAt: number;
+  nextClawAt: number;
+  clawsRemaining: number;
+  swipes: ClawSwipe[];
+};
+type BuddyGrowPower = {
+  kind: "buddy-grow";
+  endsAt: number;
+};
+type SparksPigsPower = {
+  kind: "sparks-pigs";
+  endsAt: number;
+  pigs: Pig[];
+};
+type ActivePower =
+  | BitsyTrailPower
+  | GinnyClawsPower
+  | BuddyGrowPower
+  | SparksPigsPower;
+
+type PowerUp = Vec & { spawnTime: number };
 
 type Particle = Vec & {
   vx: number;
@@ -141,6 +183,23 @@ let p2Char: Character | null = null;
 const players: Hero[] = [];
 const kittens: Kitten[] = [];
 const particles: Particle[] = [];
+
+let powerUp: PowerUp | null = null;
+let nextPowerUpSpawnTime = 0;
+const POWERUP_INTERVAL_MS = 30_000;
+const POWERUP_PICKUP_RADIUS = 26;
+
+// Power-up durations / parameters per character.
+const BITSY_DURATION_MS = 8_000;
+const BITSY_TRAIL_LIFETIME_MS = 1500;
+const GINNY_CLAWS_TOTAL = 6;
+const GINNY_CLAWS_INTERVAL_MS = 1500;
+const GINNY_CLAW_LIFETIME_MS = 420;
+const GINNY_CLAW_RADIUS = 80;
+const BUDDY_DURATION_MS = 10_000;
+const BUDDY_SCALE = 2.5;
+const SPARKS_DURATION_MS = 20_000;
+const SPARKS_PIG_COUNT = 5;
 
 const KITTEN_COLORS = ["#fff4d6", "#cdb6ff", "#b6f0ff", "#ffd6e8", "#d6ffc7", "#ffe0a3"];
 const PARTICLE_COLORS = ["#ff7ab8", "#ffb3d9", "#ffd166", "#fff3a3", "#b39dff", "#a8e6ff"];
@@ -411,14 +470,104 @@ function startGame(): void {
       controls: i === 0 ? ARROW_CONTROLS : WASD_CONTROLS,
       label: `P${i + 1}`,
       lockedTarget: null,
+      activePower: null,
     });
   }
   score = 0;
   scoreEl.textContent = "0";
   particles.length = 0;
+  powerUp = null;
+  nextPowerUpSpawnTime = performance.now() + POWERUP_INTERVAL_MS;
   buildCity();
   spawnKittens();
   state = "playing";
+}
+
+function heroSpeedMultiplier(h: Hero): number {
+  if (!h.activePower) return 1;
+  if (h.activePower.kind === "bitsy-trail") return 2;
+  if (h.activePower.kind === "sparks-pigs") return 1.5;
+  return 1;
+}
+function heroSizeMultiplier(h: Hero): number {
+  return h.activePower?.kind === "buddy-grow" ? BUDDY_SCALE : 1;
+}
+
+function catchKitten(k: Kitten): void {
+  if (k.saved) return;
+  k.saved = true;
+  score++;
+  scoreEl.textContent = String(score);
+  rescueChime();
+  emitRescueBurst(k.x, k.y);
+  if (kittens.every((kk) => kk.saved)) {
+    winFanfare();
+    stopBeamSound();
+    setTimeout(resetRound, 1400);
+  }
+}
+
+function activatePower(p: Hero): void {
+  const now = performance.now();
+  switch (p.character.id) {
+    case "bitsy":
+      p.activePower = { kind: "bitsy-trail", endsAt: now + BITSY_DURATION_MS, trail: [] };
+      break;
+    case "ginny":
+      p.activePower = {
+        kind: "ginny-claws",
+        endsAt: now + GINNY_CLAWS_INTERVAL_MS * GINNY_CLAWS_TOTAL + 200,
+        nextClawAt: now + 100,
+        clawsRemaining: GINNY_CLAWS_TOTAL,
+        swipes: [],
+      };
+      break;
+    case "buddy":
+      p.activePower = { kind: "buddy-grow", endsAt: now + BUDDY_DURATION_MS };
+      break;
+    case "sparks":
+      p.activePower = {
+        kind: "sparks-pigs",
+        endsAt: now + SPARKS_DURATION_MS,
+        pigs: spawnPigs(p, SPARKS_PIG_COUNT),
+      };
+      break;
+  }
+  // pickup chime
+  blip(1500, 0.1, "triangle", 0.1);
+  setTimeout(() => blip(2200, 0.16, "triangle", 0.08), 80);
+}
+
+function spawnPigs(spawner: Hero, count: number): Pig[] {
+  const pigs: Pig[] = [];
+  for (let i = 0; i < count; i++) {
+    const a = (Math.PI * 2 * i) / count;
+    pigs.push({
+      x: spawner.x + Math.cos(a) * 24,
+      y: spawner.y + Math.sin(a) * 24,
+      vx: Math.cos(a) * 1.5,
+      vy: Math.sin(a) * 1.5,
+      wanderTimer: 30 + Math.random() * 60,
+      bob: Math.random() * Math.PI * 2,
+    });
+  }
+  return pigs;
+}
+
+function trySpawnPowerUp(now: number): void {
+  if (powerUp || now < nextPowerUpSpawnTime) return;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const c = 1 + Math.floor(Math.random() * (COLS - 2));
+    const r = 1 + Math.floor(Math.random() * (ROWS - 2));
+    if (map[r][c] === 1) continue;
+    const x = c * TILE + TILE / 2;
+    const y = r * TILE + TILE / 2;
+    if (players.some((p) => Math.hypot(p.x - x, p.y - y) < 110)) continue;
+    powerUp = { x, y, spawnTime: now };
+    return;
+  }
+  // Couldn't place — try again in 2s.
+  nextPowerUpSpawnTime = now + 2000;
 }
 
 // --- Update --------------------------------------------------------------
@@ -500,17 +649,109 @@ function updatePlaying(): void {
     state = "mode-select";
     return;
   }
-  // Per-player movement.
+
+  const now = performance.now();
+  trySpawnPowerUp(now);
+
+  // Per-player movement (speed multiplier from active power).
   for (const p of players) {
     const want = inputForControls(p.controls);
-    const tvx = want.x * HERO_SPEED;
-    const tvy = want.y * HERO_SPEED;
+    const speed = HERO_SPEED * heroSpeedMultiplier(p);
+    const tvx = want.x * speed;
+    const tvy = want.y * speed;
     p.vx += (tvx - p.vx) * 0.35;
     p.vy += (tvy - p.vy) * 0.35;
     if (Math.abs(p.vx) > 0.05) p.facing = p.vx > 0 ? 1 : -1;
     p.x = Math.max(HERO_RADIUS, Math.min(W - HERO_RADIUS, p.x + p.vx));
     p.y = Math.max(HERO_RADIUS, Math.min(H - HERO_RADIUS, p.y + p.vy));
     p.bounce += Math.hypot(p.vx, p.vy) * 0.08;
+  }
+
+  // Power-up pickup — only players without an active power can grab it.
+  if (powerUp) {
+    for (const p of players) {
+      if (p.activePower) continue;
+      const heroR = HERO_RADIUS * heroSizeMultiplier(p);
+      if (Math.hypot(p.x - powerUp.x, p.y - powerUp.y) < heroR + POWERUP_PICKUP_RADIUS) {
+        activatePower(p);
+        powerUp = null;
+        nextPowerUpSpawnTime = now + POWERUP_INTERVAL_MS;
+        break;
+      }
+    }
+  }
+
+  // Per-power updates (trails, claws, pigs, expirations).
+  for (const p of players) {
+    const ap = p.activePower;
+    if (!ap) continue;
+    const expired = now >= ap.endsAt;
+    if (ap.kind === "bitsy-trail") {
+      if (!expired) ap.trail.push({ x: p.x, y: p.y, time: now });
+      while (ap.trail.length > 0 && now - ap.trail[0].time > BITSY_TRAIL_LIFETIME_MS) {
+        ap.trail.shift();
+      }
+      // Catch any kitten that touches the trail.
+      for (const k of kittens) {
+        if (k.saved) continue;
+        for (const pt of ap.trail) {
+          if (Math.hypot(k.x - pt.x, k.y - pt.y) < KITTEN_RADIUS + 12) {
+            catchKitten(k);
+            break;
+          }
+        }
+      }
+      if (expired && ap.trail.length === 0) p.activePower = null;
+    } else if (ap.kind === "ginny-claws") {
+      if (ap.clawsRemaining > 0 && now >= ap.nextClawAt) {
+        ap.swipes.push({ x: p.x, y: p.y, startTime: now, lifetime: GINNY_CLAW_LIFETIME_MS });
+        ap.clawsRemaining--;
+        ap.nextClawAt = now + GINNY_CLAWS_INTERVAL_MS;
+        // Slash chime placeholder.
+        blip(1200, 0.05, "sawtooth", 0.06);
+        setTimeout(() => blip(800, 0.06, "sawtooth", 0.05), 30);
+      }
+      ap.swipes = ap.swipes.filter((s) => now - s.startTime < s.lifetime);
+      for (const swipe of ap.swipes) {
+        for (const k of kittens) {
+          if (k.saved) continue;
+          if (Math.hypot(k.x - swipe.x, k.y - swipe.y) < GINNY_CLAW_RADIUS + KITTEN_RADIUS) {
+            catchKitten(k);
+          }
+        }
+      }
+      if (ap.clawsRemaining === 0 && ap.swipes.length === 0 && expired) {
+        p.activePower = null;
+      }
+    } else if (ap.kind === "buddy-grow") {
+      // Catch handled in the main rescue check (size multiplier expands reach).
+      if (expired) p.activePower = null;
+    } else if (ap.kind === "sparks-pigs") {
+      for (const pig of ap.pigs) {
+        pig.bob += 0.18;
+        pig.wanderTimer--;
+        if (pig.wanderTimer <= 0) {
+          const angle = Math.random() * Math.PI * 2;
+          const sp = 1.2 + Math.random() * 0.8;
+          pig.vx = Math.cos(angle) * sp;
+          pig.vy = Math.sin(angle) * sp;
+          pig.wanderTimer = 40 + Math.random() * 80;
+        }
+        pig.x += pig.vx;
+        pig.y += pig.vy;
+        if (pig.x < 16) { pig.x = 16; pig.vx = Math.abs(pig.vx); }
+        if (pig.x > W - 16) { pig.x = W - 16; pig.vx = -Math.abs(pig.vx); }
+        if (pig.y < 16) { pig.y = 16; pig.vy = Math.abs(pig.vy); }
+        if (pig.y > H - 16) { pig.y = H - 16; pig.vy = -Math.abs(pig.vy); }
+        for (const k of kittens) {
+          if (k.saved) continue;
+          if (Math.hypot(k.x - pig.x, k.y - pig.y) < KITTEN_RADIUS + 16) {
+            catchKitten(k);
+          }
+        }
+      }
+      if (expired) p.activePower = null;
+    }
   }
 
   // Per-player gravity-pulse target lock.
@@ -583,21 +824,13 @@ function updatePlaying(): void {
     k.vy = km.vy;
   }
 
-  // Rescue: any player who touches a kitten saves it.
+  // Rescue: any player who touches a kitten saves it (Buddy's grown size extends reach).
   for (const k of kittens) {
     if (k.saved) continue;
     for (const p of players) {
-      if (Math.hypot(k.x - p.x, k.y - p.y) < HERO_RADIUS + KITTEN_RADIUS - 8) {
-        k.saved = true;
-        score++;
-        scoreEl.textContent = String(score);
-        rescueChime();
-        emitRescueBurst(k.x, k.y);
-        if (kittens.every((kk) => kk.saved)) {
-          winFanfare();
-          stopBeamSound();
-          setTimeout(resetRound, 1400);
-        }
+      const heroR = HERO_RADIUS * heroSizeMultiplier(p);
+      if (Math.hypot(k.x - p.x, k.y - p.y) < heroR + KITTEN_RADIUS - 8) {
+        catchKitten(k);
         break;
       }
     }
@@ -822,12 +1055,36 @@ function renderPlaying(): void {
   ctx.fillRect(0, 0, W, H);
   drawCity();
 
+  // Power-up item sits on the ground (under everything else).
+  if (powerUp) drawPowerUp(powerUp);
+
+  // Bitsy trails go under kittens so a saved kitten can vanish cleanly.
+  for (const p of players) {
+    if (p.activePower?.kind === "bitsy-trail") drawBitsyTrail(p.activePower.trail);
+  }
+
+  // Robot pigs scamper under everyone.
+  for (const p of players) {
+    if (p.activePower?.kind === "sparks-pigs") {
+      for (const pig of p.activePower.pigs) drawPig(pig);
+    }
+  }
+
   for (const p of players) {
     if (p.lockedTarget) drawGravityBeam(p, p.lockedTarget);
   }
 
   for (const k of kittens) drawKitten(k);
+
+  // Hero auras render under the hero, the hero on top, then claws above.
+  for (const p of players) drawHeroAura(p);
   for (const p of players) drawHero(p);
+  for (const p of players) {
+    if (p.activePower?.kind === "ginny-claws") {
+      for (const swipe of p.activePower.swipes) drawClawSwipe(swipe);
+    }
+  }
+
   for (const pr of particles) drawParticle(pr);
 
   if (mode === 2) {
@@ -1038,6 +1295,8 @@ function drawHeroBody(c: Character, facing: 1 | -1, bobY = 0): void {
 function drawHero(h: Hero): void {
   ctx.save();
   ctx.translate(h.x, h.y);
+  const size = heroSizeMultiplier(h);
+  if (size !== 1) ctx.scale(size, size);
   drawHeroBody(h.character, h.facing, Math.sin(h.bounce) * 2);
   ctx.restore();
 }
@@ -1260,6 +1519,235 @@ function drawParticle(p: Particle): void {
     ctx.fill();
   }
   ctx.globalAlpha = 1;
+}
+
+// --- Power-up rendering --------------------------------------------------
+
+function drawPowerUp(p: PowerUp): void {
+  const t = performance.now() / 300;
+  const pulse = 1 + Math.sin(t) * 0.12;
+  const cx = p.x;
+  const cy = p.y + Math.sin(t * 0.7) * 4;
+
+  // Outer halo.
+  const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, 44 * pulse);
+  halo.addColorStop(0, "rgba(255, 230, 130, 0.55)");
+  halo.addColorStop(0.5, "rgba(255, 180, 220, 0.25)");
+  halo.addColorStop(1, "rgba(255, 180, 220, 0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 44 * pulse, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Sphere.
+  const ball = ctx.createRadialGradient(cx - 4, cy - 4, 1, cx, cy, 16);
+  ball.addColorStop(0, "#fff7d0");
+  ball.addColorStop(0.4, "#ffd166");
+  ball.addColorStop(1, "#ff5fb0");
+  ctx.fillStyle = ball;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Star points spinning around it.
+  for (let i = 0; i < 6; i++) {
+    const a = (Math.PI * 2 * i) / 6 + t;
+    const r1 = 18;
+    const r2 = 26 + Math.sin(t * 2 + i) * 3;
+    const x1 = cx + Math.cos(a) * r1;
+    const y1 = cy + Math.sin(a) * r1;
+    const x2 = cx + Math.cos(a) * r2;
+    const y2 = cy + Math.sin(a) * r2;
+    ctx.strokeStyle = "rgba(255, 240, 150, 0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+}
+
+const TRAIL_COLORS = ["#ff7ab8", "#ffd166", "#fff3a3", "#7ec8ff", "#cdb6ff"];
+
+function drawBitsyTrail(trail: TrailPoint[]): void {
+  const now = performance.now();
+  for (let i = 0; i < trail.length; i++) {
+    const pt = trail[i];
+    const age = now - pt.time;
+    const a = Math.max(0, 1 - age / BITSY_TRAIL_LIFETIME_MS);
+    if (a <= 0) continue;
+    // Nyan-style stripes — small horizontal bar of pastel colors.
+    const radius = 14 + a * 4;
+    for (let band = 0; band < TRAIL_COLORS.length; band++) {
+      const offset = (band - (TRAIL_COLORS.length - 1) / 2) * 4;
+      ctx.fillStyle = TRAIL_COLORS[band] + alphaHex(a * 0.85);
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y + offset, radius * 0.42, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // sparkle dots near recent points
+    if (i % 3 === 0 && a > 0.4) {
+      ctx.fillStyle = `rgba(255,255,255,${a})`;
+      ctx.beginPath();
+      ctx.arc(pt.x + (i % 7) - 3, pt.y - 12, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function alphaHex(a: number): string {
+  const v = Math.max(0, Math.min(255, Math.round(a * 255)));
+  return v.toString(16).padStart(2, "0");
+}
+
+function drawClawSwipe(s: ClawSwipe): void {
+  const now = performance.now();
+  const age = now - s.startTime;
+  const t = Math.min(1, age / s.lifetime);
+  // Three radial slashes that fan out as the swipe ages.
+  const alpha = (1 - t) * 0.95;
+  const expand = GINNY_CLAW_RADIUS * (0.4 + t * 0.7);
+  ctx.save();
+  ctx.translate(s.x, s.y);
+  ctx.shadowColor = "rgba(255, 80, 110, 0.9)";
+  ctx.shadowBlur = 12;
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 - 0.5 + (i / 4) * Math.PI;
+    const x1 = Math.cos(a) * 12;
+    const y1 = Math.sin(a) * 12;
+    const x2 = Math.cos(a) * expand;
+    const y2 = Math.sin(a) * expand;
+    ctx.strokeStyle = `rgba(255, 245, 245, ${alpha})`;
+    ctx.lineWidth = 6;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(255, 90, 130, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawPig(pig: Pig): void {
+  ctx.save();
+  ctx.translate(pig.x, pig.y + Math.sin(pig.bob) * 1.5);
+  // Face direction by velocity.
+  const facing = pig.vx < 0 ? -1 : 1;
+  ctx.scale(facing, 1);
+
+  // Body — soft pink robot belly.
+  ctx.fillStyle = "#f7c2ec";
+  ctx.beginPath();
+  ctx.ellipse(0, 4, 14, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Belly plate.
+  ctx.fillStyle = "#fde2f6";
+  ctx.beginPath();
+  ctx.ellipse(0, 6, 8, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Legs (4 stubs).
+  ctx.fillStyle = "#c585bb";
+  for (const lx of [-9, -3, 3, 9]) {
+    ctx.fillRect(lx - 2, 11, 4, 5);
+  }
+  // Head — blue robot face.
+  ctx.fillStyle = "#7ec8ff";
+  ctx.beginPath();
+  ctx.arc(0, -4, 9, 0, Math.PI * 2);
+  ctx.fill();
+  // Floppy pink ears.
+  ctx.fillStyle = "#f7a3e3";
+  ctx.beginPath();
+  ctx.ellipse(-7, -7, 4, 6, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(7, -7, 4, 6, 0.4, 0, Math.PI * 2);
+  ctx.fill();
+  // Snout.
+  ctx.fillStyle = "#ffaecd";
+  ctx.beginPath();
+  ctx.ellipse(0, -1, 4.5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#5a3742";
+  ctx.beginPath();
+  ctx.arc(-1.4, -1, 0.6, 0, Math.PI * 2);
+  ctx.arc(1.4, -1, 0.6, 0, Math.PI * 2);
+  ctx.fill();
+  // Eyes.
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(-3, -5, 1.6, 0, Math.PI * 2);
+  ctx.arc(3, -5, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#000";
+  ctx.beginPath();
+  ctx.arc(-3, -5, 0.8, 0, Math.PI * 2);
+  ctx.arc(3, -5, 0.8, 0, Math.PI * 2);
+  ctx.fill();
+  // Robot antenna.
+  ctx.strokeStyle = "#888";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(0, -13);
+  ctx.lineTo(0, -16);
+  ctx.stroke();
+  ctx.fillStyle = "#fff52a";
+  ctx.beginPath();
+  ctx.arc(0, -17, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHeroAura(h: Hero): void {
+  if (!h.activePower) return;
+  const t = performance.now() / 350;
+  let baseR: number;
+  let color: string;
+  let glowAlpha: number;
+  switch (h.activePower.kind) {
+    case "bitsy-trail":
+      baseR = 32;
+      color = "180, 240, 255";
+      glowAlpha = 0.35;
+      break;
+    case "ginny-claws":
+      baseR = 34;
+      color = "255, 90, 130";
+      glowAlpha = 0.45;
+      break;
+    case "buddy-grow":
+      baseR = 60;
+      color = "255, 140, 60";
+      glowAlpha = 0.55;
+      break;
+    case "sparks-pigs":
+      baseR = 32;
+      color = "255, 220, 100";
+      glowAlpha = 0.45;
+      break;
+  }
+  const pulse = 1 + Math.sin(t) * 0.08;
+  const r = baseR * pulse;
+  const grad = ctx.createRadialGradient(h.x, h.y, 0, h.x, h.y, r);
+  grad.addColorStop(0, `rgba(${color}, ${glowAlpha})`);
+  grad.addColorStop(1, `rgba(${color}, 0)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, r, 0, Math.PI * 2);
+  ctx.fill();
+  // Outer ring for emphasis.
+  ctx.strokeStyle = `rgba(${color}, ${0.4 + Math.sin(t * 1.5) * 0.2})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, r * 0.8, 0, Math.PI * 2);
+  ctx.stroke();
 }
 
 // --- Loop ----------------------------------------------------------------
