@@ -187,7 +187,8 @@ const particles: Particle[] = [];
 let powerUp: PowerUp | null = null;
 let nextPowerUpSpawnTime = 0;
 const POWERUP_INTERVAL_MS = 30_000;
-const POWERUP_FIRST_DELAY_MS = 8_000;
+// Testing: spawn the first orb immediately so we don't wait between iterations.
+const POWERUP_FIRST_DELAY_MS = 0;
 const POWERUP_PICKUP_RADIUS = 26;
 
 // Power-up durations / parameters per character.
@@ -195,8 +196,8 @@ const BITSY_DURATION_MS = 8_000;
 const BITSY_TRAIL_LIFETIME_MS = 1500;
 const GINNY_CLAWS_TOTAL = 6;
 const GINNY_CLAWS_INTERVAL_MS = 1500;
-const GINNY_CLAW_LIFETIME_MS = 420;
-const GINNY_CLAW_RADIUS = 80;
+const GINNY_CLAW_LIFETIME_MS = 2000;
+const GINNY_CLAW_RADIUS = 240; // 3x bigger reach
 const BUDDY_DURATION_MS = 10_000;
 const BUDDY_SCALE = 2.5;
 const SPARKS_DURATION_MS = 20_000;
@@ -488,9 +489,12 @@ function startGame(): void {
 
 function heroSpeedMultiplier(h: Hero): number {
   if (!h.activePower) return 1;
-  if (h.activePower.kind === "bitsy-trail") return 2;
-  if (h.activePower.kind === "sparks-pigs") return 1.5;
-  return 1;
+  switch (h.activePower.kind) {
+    case "bitsy-trail": return 2;
+    case "sparks-pigs": return 1.5;
+    case "ginny-claws": return 1.25;
+    case "buddy-grow": return 1.25;
+  }
 }
 function heroSizeMultiplier(h: Hero): number {
   return h.activePower?.kind === "buddy-grow" ? BUDDY_SCALE : 1;
@@ -715,10 +719,13 @@ function updatePlaying(): void {
         setTimeout(() => blip(800, 0.06, "sawtooth", 0.05), 30);
       }
       ap.swipes = ap.swipes.filter((s) => now - s.startTime < s.lifetime);
+      // Slash zone: horizontal rectangle matching the rendered bars.
       for (const swipe of ap.swipes) {
         for (const k of kittens) {
           if (k.saved) continue;
-          if (Math.hypot(k.x - swipe.x, k.y - swipe.y) < GINNY_CLAW_RADIUS + KITTEN_RADIUS) {
+          const dx = Math.abs(k.x - swipe.x);
+          const dy = Math.abs(k.y - swipe.y);
+          if (dx < GINNY_CLAW_RADIUS + KITTEN_RADIUS && dy < 36 + KITTEN_RADIUS) {
             catchKitten(k);
           }
         }
@@ -735,7 +742,8 @@ function updatePlaying(): void {
         pig.wanderTimer--;
         if (pig.wanderTimer <= 0) {
           const angle = Math.random() * Math.PI * 2;
-          const sp = 1.2 + Math.random() * 0.8;
+          // 20% faster wander velocity.
+          const sp = (1.2 + Math.random() * 0.8) * 1.2;
           pig.vx = Math.cos(angle) * sp;
           pig.vy = Math.sin(angle) * sp;
           pig.wanderTimer = 40 + Math.random() * 80;
@@ -748,7 +756,8 @@ function updatePlaying(): void {
         if (pig.y > H - 16) { pig.y = H - 16; pig.vy = -Math.abs(pig.vy); }
         for (const k of kittens) {
           if (k.saved) continue;
-          if (Math.hypot(k.x - pig.x, k.y - pig.y) < KITTEN_RADIUS + 16) {
+          // Catch radius scaled with the bigger pig sprite.
+          if (Math.hypot(k.x - pig.x, k.y - pig.y) < KITTEN_RADIUS + 20) {
             catchKitten(k);
           }
         }
@@ -1607,33 +1616,50 @@ function drawClawSwipe(s: ClawSwipe): void {
   const now = performance.now();
   const age = now - s.startTime;
   const t = Math.min(1, age / s.lifetime);
-  // Three radial slashes that fan out as the swipe ages.
-  const alpha = (1 - t) * 0.95;
-  const expand = GINNY_CLAW_RADIUS * (0.4 + t * 0.7);
+  // Strong at impact, fading to gone over the full lifetime.
+  const alpha = Math.pow(1 - t, 1.4);
+  // Reach grows quickly to full extension, then holds.
+  const reach = GINNY_CLAW_RADIUS * Math.min(1, t * 4);
+  // Vertical slash bars: 4 parallel lines spanning full width on both sides.
+  const bars = [-26, -9, 9, 26];
+
   ctx.save();
   ctx.translate(s.x, s.y);
-  ctx.shadowColor = "rgba(255, 80, 110, 0.9)";
-  ctx.shadowBlur = 12;
-  for (let i = 0; i < 5; i++) {
-    const a = -Math.PI / 2 - 0.5 + (i / 4) * Math.PI;
-    const x1 = Math.cos(a) * 12;
-    const y1 = Math.sin(a) * 12;
-    const x2 = Math.cos(a) * expand;
-    const y2 = Math.sin(a) * expand;
-    ctx.strokeStyle = `rgba(255, 245, 245, ${alpha})`;
-    ctx.lineWidth = 6;
+
+  // Soft pink slab fills the space between the bars so it reads as a
+  // sweep rather than a few thin lines.
+  const slabGrad = ctx.createLinearGradient(-reach, 0, reach, 0);
+  slabGrad.addColorStop(0.0, `rgba(255, 90, 130, 0)`);
+  slabGrad.addColorStop(0.2, `rgba(255, 130, 160, ${alpha * 0.45})`);
+  slabGrad.addColorStop(0.5, `rgba(255, 150, 180, ${alpha * 0.6})`);
+  slabGrad.addColorStop(0.8, `rgba(255, 130, 160, ${alpha * 0.45})`);
+  slabGrad.addColorStop(1.0, `rgba(255, 90, 130, 0)`);
+  ctx.fillStyle = slabGrad;
+  ctx.fillRect(-reach, -36, reach * 2, 72);
+
+  // Shadow glow on bright slashes.
+  ctx.shadowColor = `rgba(255, 80, 110, ${alpha})`;
+  ctx.shadowBlur = 14;
+
+  for (const y of bars) {
+    // Fat white core slash.
+    ctx.strokeStyle = `rgba(255, 250, 250, ${alpha})`;
+    ctx.lineWidth = 9;
     ctx.lineCap = "round";
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
+    ctx.moveTo(-reach, y);
+    ctx.lineTo(reach, y);
     ctx.stroke();
+    // Pink edging.
     ctx.strokeStyle = `rgba(255, 90, 130, ${alpha})`;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
+    ctx.moveTo(-reach, y);
+    ctx.lineTo(reach, y);
     ctx.stroke();
   }
+
+  ctx.shadowBlur = 0;
   ctx.restore();
 }
 
@@ -1643,6 +1669,8 @@ function drawPig(pig: Pig): void {
   // Face direction by velocity.
   const facing = pig.vx < 0 ? -1 : 1;
   ctx.scale(facing, 1);
+  // 20% larger pig sprite.
+  ctx.scale(1.2, 1.2);
 
   // Body — soft pink robot belly.
   ctx.fillStyle = "#f7c2ec";
@@ -1710,10 +1738,16 @@ function drawPig(pig: Pig): void {
 
 function drawHeroAura(h: Hero): void {
   if (!h.activePower) return;
+  // Buddy's blitzball gets its own big purple pulsing render.
+  if (h.activePower.kind === "buddy-grow") {
+    drawBuddyBlitzball(h);
+    return;
+  }
   const t = performance.now() / 350;
   let baseR: number;
   let color: string;
   let glowAlpha: number;
+  let pulseAmp = 0.08;
   switch (h.activePower.kind) {
     case "bitsy-trail":
       baseR = 32;
@@ -1725,18 +1759,14 @@ function drawHeroAura(h: Hero): void {
       color = "255, 90, 130";
       glowAlpha = 0.45;
       break;
-    case "buddy-grow":
-      baseR = 60;
-      color = "255, 140, 60";
-      glowAlpha = 0.55;
-      break;
     case "sparks-pigs":
-      baseR = 32;
-      color = "255, 220, 100";
-      glowAlpha = 0.45;
+      baseR = 44;
+      color = "255, 215, 70";
+      glowAlpha = 0.65;
+      pulseAmp = 0.22;
       break;
   }
-  const pulse = 1 + Math.sin(t) * 0.08;
+  const pulse = 1 + Math.sin(t) * pulseAmp;
   const r = baseR * pulse;
   const grad = ctx.createRadialGradient(h.x, h.y, 0, h.x, h.y, r);
   grad.addColorStop(0, `rgba(${color}, ${glowAlpha})`);
@@ -1745,12 +1775,61 @@ function drawHeroAura(h: Hero): void {
   ctx.beginPath();
   ctx.arc(h.x, h.y, r, 0, Math.PI * 2);
   ctx.fill();
-  // Outer ring for emphasis.
-  ctx.strokeStyle = `rgba(${color}, ${0.4 + Math.sin(t * 1.5) * 0.2})`;
+  ctx.strokeStyle = `rgba(${color}, ${0.4 + Math.sin(t * 1.5) * 0.25})`;
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(h.x, h.y, r * 0.8, 0, Math.PI * 2);
   ctx.stroke();
+  // Sparks gets a second outer ring that pulses on a slightly different beat
+  // so the aura reads as actively buzzing.
+  if (h.activePower.kind === "sparks-pigs") {
+    const t2 = performance.now() / 220;
+    ctx.strokeStyle = `rgba(${color}, ${0.45 + Math.sin(t2) * 0.3})`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(h.x, h.y, r * (1.05 + Math.sin(t2 * 1.2) * 0.1), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawBuddyBlitzball(h: Hero): void {
+  const t = performance.now() / 380;
+  const pulseSlow = 1 + Math.sin(t) * 0.16;
+  const pulseFast = 1 + Math.sin(t * 2.3) * 0.08;
+  const baseR = 92 * pulseSlow;
+
+  // Outer halo.
+  const halo = ctx.createRadialGradient(h.x, h.y, baseR * 0.45, h.x, h.y, baseR * 1.5);
+  halo.addColorStop(0, "rgba(190, 110, 255, 0.55)");
+  halo.addColorStop(0.6, "rgba(140, 60, 220, 0.35)");
+  halo.addColorStop(1, "rgba(140, 60, 220, 0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, baseR * 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Main orb.
+  const orb = ctx.createRadialGradient(h.x - baseR * 0.3, h.y - baseR * 0.3, baseR * 0.05, h.x, h.y, baseR);
+  orb.addColorStop(0, "rgba(225, 190, 255, 0.55)");
+  orb.addColorStop(0.55, "rgba(170, 100, 240, 0.42)");
+  orb.addColorStop(1, "rgba(110, 50, 190, 0.32)");
+  ctx.fillStyle = orb;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, baseR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Surface band.
+  ctx.strokeStyle = `rgba(230, 200, 255, ${0.55 + Math.sin(t * 1.5) * 0.3})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(h.x, h.y, baseR * 0.92 * pulseFast, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Specular highlight.
+  ctx.fillStyle = "rgba(255, 240, 255, 0.45)";
+  ctx.beginPath();
+  ctx.ellipse(h.x - baseR * 0.42, h.y - baseR * 0.42, baseR * 0.2, baseR * 0.1, -0.4, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 // --- Loop ----------------------------------------------------------------
