@@ -62,6 +62,17 @@ type Hero = Vec & {
 
 type TrailPoint = Vec & { time: number };
 type ClawSwipe = { x: number; y: number; startTime: number; lifetime: number };
+type CatBurglar = Vec & {
+  vx: number;
+  vy: number;
+  bob: number;
+  facing: 1 | -1;
+  hitsTaken: number;
+  invulnUntil: number;
+  caught: boolean;
+  wanderTimer: number;
+};
+
 type Pig = Vec & {
   vx: number;
   vy: number;
@@ -187,6 +198,16 @@ let p2Char: Character | null = null;
 const players: Hero[] = [];
 const kittens: Kitten[] = [];
 const particles: Particle[] = [];
+
+// Levels alternate day -> night. Level 1 is day, level 2 is night, etc.
+let level = 1;
+let isNight = false;
+let levelBannerUntil = 0;
+let burglar: CatBurglar | null = null;
+const BURGLAR_RADIUS = 26;
+const BURGLAR_BASE_SPEED = 1.6;
+const BURGLAR_INVULN_MS = 5_000;
+const BURGLAR_HITS_TO_CATCH = 3;
 
 const powerUps: PowerUp[] = [];
 let nextPowerUpSpawnTime = 0;
@@ -567,6 +588,9 @@ function startGame(): void {
   scoreEl.textContent = "0";
   particles.length = 0;
   powerUps.length = 0;
+  level = 1;
+  burglar = null;
+  applyLevelMode();
   // First power-up arrives quickly so play feels eventful from the start;
   // subsequent ones come on the regular cycle (halved in 2P).
   nextPowerUpSpawnTime = performance.now() + POWERUP_FIRST_DELAY_MS;
@@ -604,11 +628,16 @@ function catchKitten(k: Kitten): void {
   scoreEl.textContent = String(score);
   rescueChime();
   emitRescueBurst(k.x, k.y);
-  if (kittens.every((kk) => kk.saved)) {
-    winFanfare();
-    stopBeamSound();
-    setTimeout(resetRound, 1400);
-  }
+  checkLevelComplete();
+}
+
+function checkLevelComplete(): void {
+  if (kittens.length === 0) return;
+  if (!kittens.every((kk) => kk.saved)) return;
+  if (burglar && !burglar.caught) return; // boss must be caught first
+  winFanfare();
+  stopBeamSound();
+  setTimeout(advanceLevel, 1400);
 }
 
 function activatePower(p: Hero): void {
@@ -831,6 +860,10 @@ function updatePlaying(): void {
           }
         }
       }
+      // The trail also damages the boss.
+      for (const pt of ap.trail) {
+        if (tryHitBurglar(pt.x, pt.y, 12)) break;
+      }
       if (expired && ap.trail.length === 0) endPower(p);
     } else if (ap.kind === "ginny-claws") {
       if (ap.clawsRemaining > 0 && now >= ap.nextClawAt) {
@@ -850,6 +883,8 @@ function updatePlaying(): void {
             catchKitten(k);
           }
         }
+        // Slashes also damage the boss.
+        tryHitBurglar(swipe.x, swipe.y, GINNY_CLAW_RADIUS);
       }
       if (ap.clawsRemaining === 0 && ap.swipes.length === 0 && expired) {
         endPower(p);
@@ -888,6 +923,8 @@ function updatePlaying(): void {
             catchKitten(k);
           }
         }
+        // Pigs also bonk the boss on contact.
+        tryHitBurglar(pig.x, pig.y, 20);
       }
       if (expired) endPower(p);
     }
@@ -976,6 +1013,16 @@ function updatePlaying(): void {
     }
   }
 
+  // Cat Burglar: AI + hit detection.
+  if (burglar && !burglar.caught) {
+    updateBurglar(now);
+    // Direct hero contact registers a hit (subject to invulnerability).
+    for (const p of players) {
+      const heroR = heroCatchRadius(p);
+      if (tryHitBurglar(p.x, p.y, heroR - 6)) break;
+    }
+  }
+
   // Particles.
   for (const pr of particles) {
     pr.x += pr.vx;
@@ -1038,8 +1085,179 @@ function emitRescueBurst(x: number, y: number): void {
   }
 }
 
-function resetRound(): void {
+function applyLevelMode(): void {
+  // Even-numbered levels are night.
+  isNight = level % 2 === 0;
+  levelBannerUntil = performance.now() + 2200;
+}
+
+function advanceLevel(): void {
+  level++;
+  applyLevelMode();
   spawnKittens();
+  burglar = isNight ? makeBurglar() : null;
+}
+
+function updateBurglar(now: number): void {
+  if (!burglar || burglar.caught || players.length === 0) return;
+  burglar.bob += 0.15;
+
+  // Pick the nearest player to flee from.
+  let nearest = players[0];
+  let nd = Math.hypot(nearest.x - burglar.x, nearest.y - burglar.y);
+  for (let i = 1; i < players.length; i++) {
+    const d = Math.hypot(players[i].x - burglar.x, players[i].y - burglar.y);
+    if (d < nd) { nd = d; nearest = players[i]; }
+  }
+
+  burglar.wanderTimer--;
+  // Re-pick a heading periodically so movement isn't too predictable.
+  if (burglar.wanderTimer <= 0) {
+    burglar.wanderTimer = 18 + Math.floor(Math.random() * 18);
+    const dx = burglar.x - nearest.x;
+    const dy = burglar.y - nearest.y;
+    const dl = Math.hypot(dx, dy) || 1;
+    // Mostly flee, plus a wide jitter so he zigzags.
+    const fleeWeight = 0.78;
+    const rx = Math.random() * 2 - 1;
+    const ry = Math.random() * 2 - 1;
+    const dirX = (dx / dl) * fleeWeight + rx * (1 - fleeWeight);
+    const dirY = (dy / dl) * fleeWeight + ry * (1 - fleeWeight);
+    const dl2 = Math.hypot(dirX, dirY) || 1;
+    const speed = burglarCurrentSpeed(burglar);
+    burglar.vx = (dirX / dl2) * speed;
+    burglar.vy = (dirY / dl2) * speed;
+  }
+  if (burglar.vx > 0.05) burglar.facing = 1;
+  else if (burglar.vx < -0.05) burglar.facing = -1;
+
+  // The boss respects buildings (stays on walkable tiles).
+  const m = moveWithCollision(burglar, burglar.vx, burglar.vy, BURGLAR_RADIUS);
+  burglar.x = m.x;
+  burglar.y = m.y;
+  // If we bumped a wall, force a re-pick next frame.
+  if (m.vx === 0 && burglar.vx !== 0) burglar.wanderTimer = 0;
+  if (m.vy === 0 && burglar.vy !== 0) burglar.wanderTimer = 0;
+  burglar.vx = m.vx;
+  burglar.vy = m.vy;
+  // Suppress an unused-arg lint warning when we don't actually use `now`.
+  void now;
+}
+
+function makeBurglar(): CatBurglar {
+  // Spawn far from any player.
+  let bx = W * 0.85;
+  let by = H * 0.5;
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const x = TILE * 1.5 + Math.random() * (W - TILE * 3);
+    const y = TILE * 1.5 + Math.random() * (H - TILE * 3);
+    if (isBlocked(x, y)) continue;
+    const closest = players.reduce(
+      (m, p) => Math.min(m, Math.hypot(p.x - x, p.y - y)),
+      Infinity,
+    );
+    if (closest > 220) {
+      bx = x;
+      by = y;
+      break;
+    }
+  }
+  return {
+    x: bx,
+    y: by,
+    vx: 0,
+    vy: 0,
+    bob: Math.random() * Math.PI * 2,
+    facing: 1,
+    hitsTaken: 0,
+    invulnUntil: 0,
+    caught: false,
+    wanderTimer: 0,
+  };
+}
+
+function burglarCurrentSpeed(b: CatBurglar): number {
+  return BURGLAR_BASE_SPEED * Math.pow(1.8, b.hitsTaken);
+}
+
+function tryHitBurglar(x: number, y: number, sourceRadius: number): boolean {
+  if (!burglar || burglar.caught) return false;
+  const now = performance.now();
+  if (now < burglar.invulnUntil) return false;
+  if (Math.hypot(burglar.x - x, burglar.y - y) >= sourceRadius + BURGLAR_RADIUS) {
+    return false;
+  }
+  burglar.hitsTaken++;
+  if (burglar.hitsTaken >= BURGLAR_HITS_TO_CATCH) {
+    burglar.caught = true;
+    score += 5; // bonus for catching the bad guy
+    scoreEl.textContent = String(score);
+    emitBurglarCaughtBurst(burglar.x, burglar.y);
+    rescueChime();
+    checkLevelComplete();
+  } else {
+    burglar.invulnUntil = now + BURGLAR_INVULN_MS;
+    emitBurglarHitBurst(burglar.x, burglar.y);
+    // Visible bump in the direction the boss was facing away from the hit.
+    const dx = burglar.x - x;
+    const dy = burglar.y - y;
+    const dl = Math.hypot(dx, dy) || 1;
+    burglar.x += (dx / dl) * 14;
+    burglar.y += (dy / dl) * 14;
+    blip(160, 0.18, "square", 0.06);
+  }
+  return true;
+}
+
+function emitBurglarHitBurst(x: number, y: number): void {
+  for (let i = 0; i < 12; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 2;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 1,
+      life: 50, maxLife: 50,
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 0.18,
+      scale: 0.6 + Math.random() * 0.5,
+      kind: "star",
+      color: ["#ffd166", "#ffe98a", "#ffffff"][Math.floor(Math.random() * 3)],
+    });
+  }
+}
+
+function emitBurglarCaughtBurst(x: number, y: number): void {
+  // Gold + blue stars and dots radiating outward — distinctly "bad guy caught".
+  for (let i = 0; i < 18; i++) {
+    const angle = (Math.PI * 2 * i) / 18;
+    const speed = 1.5 + Math.random() * 2;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 1.4,
+      life: 90, maxLife: 90,
+      rot: Math.random() * Math.PI * 2,
+      vrot: (Math.random() - 0.5) * 0.2,
+      scale: 0.9 + Math.random() * 0.6,
+      kind: "star",
+      color: ["#ffd166", "#ffe98a", "#9bbcff", "#ffffff"][Math.floor(Math.random() * 4)],
+    });
+  }
+  for (let i = 0; i < 22; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 0.6 + Math.random() * 2.2;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 0.6,
+      life: 60, maxLife: 60,
+      rot: 0, vrot: 0,
+      scale: 0.6 + Math.random() * 0.6,
+      kind: "sparkle",
+      color: ["#9bbcff", "#cfe2ff", "#ffd166", "#ffffff"][Math.floor(Math.random() * 4)],
+    });
+  }
 }
 
 // --- Render --------------------------------------------------------------
@@ -1191,9 +1409,10 @@ function renderCharSelect(): void {
 }
 
 function renderPlaying(): void {
-  ctx.fillStyle = "#cfeeff";
+  ctx.fillStyle = isNight ? "#0a1230" : "#cfeeff";
   ctx.fillRect(0, 0, W, H);
   drawCity();
+  if (isNight) drawNightOverlay();
 
   // Power-up item sits on the ground (under everything else).
   for (const orb of powerUps) drawPowerUp(orb);
@@ -1215,6 +1434,9 @@ function renderPlaying(): void {
   }
 
   for (const k of kittens) drawKitten(k);
+
+  // Cat Burglar sits between kittens and heroes so heroes can render over him.
+  if (burglar) drawBurglar(burglar);
 
   // Hero auras render under the hero, the hero on top, then claws above.
   for (const p of players) drawHeroAura(p);
@@ -1240,18 +1462,215 @@ function renderPlaying(): void {
     }
   }
 
-  if (kittens.length > 0 && kittens.every((k) => k.saved)) {
+  // Level banner shown briefly at the start of each level.
+  if (performance.now() < levelBannerUntil) {
+    const remaining = levelBannerUntil - performance.now();
+    const alpha = Math.min(1, remaining / 600);
+    ctx.fillStyle = `rgba(0,0,0,${0.45 * alpha})`;
+    ctx.fillRect(0, H / 2 - 60, W, 120);
+    ctx.fillStyle = `rgba(255, 213, 79, ${alpha})`;
+    ctx.font = "bold 48px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`LEVEL ${level}${isNight ? " — NIGHT" : ""}`, W / 2, H / 2);
+  }
+
+  // Level-complete banner: only fires when all kittens (and boss, if any) are done.
+  const allDone = kittens.length > 0 && kittens.every((k) => k.saved) && (!burglar || burglar.caught);
+  if (allDone) {
     ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.fillRect(0, H / 2 - 60, W, 120);
     ctx.fillStyle = "#ffd0e8";
     ctx.font = "bold 56px system-ui";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("All kitties saved!", W / 2, H / 2);
+    ctx.fillText(burglar ? "All saved + burglar caught!" : "All kitties saved!", W / 2, H / 2);
   }
+
+  // Small level indicator top-center on canvas.
+  ctx.fillStyle = isNight ? "#bcd0ff" : "#1d1556";
+  ctx.font = "bold 18px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.fillText(`Level ${level}${isNight ? " 🌙" : " ☀️"}`, W / 2, 8);
 }
 
 // --- Drawing helpers -----------------------------------------------------
+
+function drawNightOverlay(): void {
+  // Cool blue dim across the whole scene.
+  ctx.fillStyle = "rgba(15, 25, 60, 0.42)";
+  ctx.fillRect(0, 0, W, H);
+  // Moon glow.
+  const mx = W - 96;
+  const my = 78;
+  const glow = ctx.createRadialGradient(mx, my, 8, mx, my, 140);
+  glow.addColorStop(0, "rgba(255, 248, 210, 0.45)");
+  glow.addColorStop(1, "rgba(255, 248, 210, 0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(mx, my, 140, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(255, 248, 210, 0.92)";
+  ctx.beginPath();
+  ctx.arc(mx, my, 24, 0, Math.PI * 2);
+  ctx.fill();
+  // Slight crescent shadow on the moon.
+  ctx.fillStyle = "rgba(15, 25, 60, 0.35)";
+  ctx.beginPath();
+  ctx.arc(mx + 8, my - 4, 22, 0, Math.PI * 2);
+  ctx.fill();
+  // Twinkling stars in the upper portion of the canvas.
+  for (let i = 0; i < 40; i++) {
+    const x = (i * 137) % W;
+    const y = (i * 89) % Math.floor(H * 0.42);
+    const a = 0.35 + Math.sin(performance.now() / 800 + i) * 0.25;
+    ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawBurglar(b: CatBurglar): void {
+  const now = performance.now();
+  if (b.caught) return;
+  ctx.save();
+  ctx.translate(b.x, b.y + Math.sin(b.bob) * 2);
+  ctx.scale(b.facing, 1);
+  // Bigger than a kitten — he's the boss.
+  ctx.scale(1.7, 1.7);
+
+  const invuln = now < b.invulnUntil;
+  const flashing = invuln && Math.floor(now / 90) % 2 === 0;
+
+  // Body — striped grey.
+  ctx.fillStyle = flashing ? "#ffffff" : "#7c8aa6";
+  ctx.beginPath();
+  ctx.ellipse(0, 4, 14, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Stripes on body.
+  ctx.fillStyle = "rgba(50, 60, 92, 0.85)";
+  ctx.fillRect(-10, 1, 3, 6);
+  ctx.fillRect(-2, -1, 3, 7);
+  ctx.fillRect(6, 1, 3, 6);
+  // Tail.
+  ctx.strokeStyle = flashing ? "#ffffff" : "#7c8aa6";
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(11, 2);
+  ctx.quadraticCurveTo(20, -4, 16, -10);
+  ctx.stroke();
+  // Head.
+  ctx.fillStyle = flashing ? "#ffffff" : "#a8b3c6";
+  ctx.beginPath();
+  ctx.arc(0, -6, 11, 0, Math.PI * 2);
+  ctx.fill();
+  // Subtle face stripes.
+  ctx.fillStyle = "rgba(50,60,92,0.4)";
+  ctx.fillRect(-9, -10, 2, 4);
+  ctx.fillRect(-3, -12, 2, 4);
+  ctx.fillRect(7, -10, 2, 4);
+  // Ears.
+  ctx.fillStyle = flashing ? "#ffffff" : "#7c8aa6";
+  ctx.beginPath();
+  ctx.moveTo(-9, -12); ctx.lineTo(-4, -18); ctx.lineTo(-3, -10); ctx.closePath();
+  ctx.moveTo(9, -12); ctx.lineTo(4, -18); ctx.lineTo(3, -10); ctx.closePath();
+  ctx.fill();
+  // Beanie hat — sits over the head, covering the ears partially.
+  ctx.fillStyle = "#3a6dba";
+  ctx.beginPath();
+  ctx.ellipse(0, -13, 13, 7, 0, Math.PI, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillRect(-13, -14, 26, 5);
+  // Cuff.
+  ctx.fillStyle = "#5a8cd8";
+  ctx.fillRect(-13, -10, 26, 2);
+  // Pom on top.
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(0, -20, 3, 0, Math.PI * 2);
+  ctx.fill();
+  // Eye mask (blue, larger than super-kitty mask, ends in points).
+  ctx.fillStyle = "#1f3a5e";
+  ctx.beginPath();
+  ctx.moveTo(-12, -8);
+  ctx.lineTo(12, -8);
+  ctx.lineTo(10, -3);
+  ctx.lineTo(2, -2);
+  ctx.lineTo(-2, -2);
+  ctx.lineTo(-10, -3);
+  ctx.closePath();
+  ctx.fill();
+  // Eyes.
+  ctx.fillStyle = "#fff";
+  ctx.beginPath();
+  ctx.arc(-5, -6, 2.2, 0, Math.PI * 2);
+  ctx.arc(5, -6, 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#000";
+  ctx.beginPath();
+  ctx.arc(-5, -6, 1.1, 0, Math.PI * 2);
+  ctx.arc(5, -6, 1.1, 0, Math.PI * 2);
+  ctx.fill();
+  // Sneer.
+  ctx.strokeStyle = "#3a2a14";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(-3, 0); ctx.quadraticCurveTo(0, -1, 3, 0);
+  ctx.stroke();
+  // Whiskers.
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(-4, -1); ctx.lineTo(-11, -2);
+  ctx.moveTo(-4,  1); ctx.lineTo(-11,  1);
+  ctx.moveTo(4, -1); ctx.lineTo(11, -2);
+  ctx.moveTo(4,  1); ctx.lineTo(11,  1);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // Hit indicator: 3 stars above the burglar, gold = remaining hits.
+  const remaining = BURGLAR_HITS_TO_CATCH - b.hitsTaken;
+  const startX = b.x - (BURGLAR_HITS_TO_CATCH - 1) * 9;
+  for (let i = 0; i < BURGLAR_HITS_TO_CATCH; i++) {
+    drawTinyStar(startX + i * 18, b.y - 50, i < remaining);
+  }
+
+  // "Invulnerable" pulsing ring while in i-frames.
+  if (invuln) {
+    const t = (now / 220) % 1;
+    ctx.strokeStyle = `rgba(255, 230, 120, ${0.5 + Math.sin(t * Math.PI * 2) * 0.3})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, BURGLAR_RADIUS + 6 + Math.sin(t * Math.PI * 2) * 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function drawTinyStar(cx: number, cy: number, filled: boolean): void {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = filled ? "#ffd166" : "rgba(120, 130, 160, 0.5)";
+  ctx.strokeStyle = "rgba(0,0,0,0.5)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = (Math.PI * 2 * i) / 10 - Math.PI / 2;
+    const r = i % 2 === 0 ? 6 : 2.5;
+    const px = Math.cos(a) * r;
+    const py = Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
 
 function drawCity(): void {
   for (let r = 0; r < ROWS; r++) {
