@@ -65,6 +65,9 @@ type ClawSwipe = { x: number; y: number; startTime: number; lifetime: number };
 type CatBurglar = Vec & {
   vx: number;
   vy: number;
+  // Steered toward each frame so direction changes blend instead of snap.
+  targetVx: number;
+  targetVy: number;
   bob: number;
   facing: 1 | -1;
   hitsTaken: number;
@@ -1111,37 +1114,60 @@ function updateBurglar(now: number): void {
   }
 
   burglar.wanderTimer--;
-  // Re-pick a heading often so movement is jumpy and erratic.
+  // Re-pick a heading every ~0.25-0.5s so movement zig-zags but stays readable.
   if (burglar.wanderTimer <= 0) {
-    burglar.wanderTimer = 5 + Math.floor(Math.random() * 12);
+    burglar.wanderTimer = 15 + Math.floor(Math.random() * 17);
     const dx = burglar.x - nearest.x;
     const dy = burglar.y - nearest.y;
     const dl = Math.hypot(dx, dy) || 1;
-    // Strong randomness so he juke-and-jives instead of fleeing in a straight line.
     // ~10% chance of a sudden burst in any direction (dash).
     const dash = Math.random() < 0.1;
-    const fleeWeight = dash ? 0 : 0.4;
+    const fleeWeight = dash ? 0 : 0.5;
     const rx = Math.random() * 2 - 1;
     const ry = Math.random() * 2 - 1;
     const dirX = (dx / dl) * fleeWeight + rx * (1 - fleeWeight);
     const dirY = (dy / dl) * fleeWeight + ry * (1 - fleeWeight);
     const dl2 = Math.hypot(dirX, dirY) || 1;
     const speed = burglarCurrentSpeed(burglar) * (dash ? 1.6 : 1);
-    burglar.vx = (dirX / dl2) * speed;
-    burglar.vy = (dirY / dl2) * speed;
+    burglar.targetVx = (dirX / dl2) * speed;
+    burglar.targetVy = (dirY / dl2) * speed;
   }
+  // Smoothly steer toward the target so direction changes don't look like teleports.
+  burglar.vx += (burglar.targetVx - burglar.vx) * 0.25;
+  burglar.vy += (burglar.targetVy - burglar.vy) * 0.25;
   if (burglar.vx > 0.05) burglar.facing = 1;
   else if (burglar.vx < -0.05) burglar.facing = -1;
 
   // The boss respects buildings (stays on walkable tiles).
-  const m = moveWithCollision(burglar, burglar.vx, burglar.vy, BURGLAR_RADIUS);
+  const inVx = burglar.vx;
+  const inVy = burglar.vy;
+  const m = moveWithCollision(burglar, inVx, inVy, BURGLAR_RADIUS);
   burglar.x = m.x;
   burglar.y = m.y;
-  // If we bumped a wall, force a re-pick next frame.
-  if (m.vx === 0 && burglar.vx !== 0) burglar.wanderTimer = 0;
-  if (m.vy === 0 && burglar.vy !== 0) burglar.wanderTimer = 0;
   burglar.vx = m.vx;
   burglar.vy = m.vy;
+  const bumpedX = m.vx === 0 && Math.abs(inVx) > 0.05;
+  const bumpedY = m.vy === 0 && Math.abs(inVy) > 0.05;
+  if (bumpedX || bumpedY) {
+    // On any wall bump, snap immediately to a fresh direction biased AWAY
+    // from the wall so we don't get pinned against geometry.
+    const speed = burglarCurrentSpeed(burglar);
+    const dirX = bumpedX
+      ? (inVx > 0 ? -1 : 1) * (0.6 + Math.random() * 0.4)
+      : Math.random() * 2 - 1;
+    const dirY = bumpedY
+      ? (inVy > 0 ? -1 : 1) * (0.6 + Math.random() * 0.4)
+      : Math.random() * 2 - 1;
+    const dl = Math.hypot(dirX, dirY) || 1;
+    const nvx = (dirX / dl) * speed;
+    const nvy = (dirY / dl) * speed;
+    // Snap velocity AND target so smoothing doesn't drag us back into the wall.
+    burglar.vx = nvx;
+    burglar.vy = nvy;
+    burglar.targetVx = nvx;
+    burglar.targetVy = nvy;
+    burglar.wanderTimer = 12 + Math.floor(Math.random() * 12);
+  }
   // Suppress an unused-arg lint warning when we don't actually use `now`.
   void now;
 }
@@ -1169,6 +1195,8 @@ function makeBurglar(): CatBurglar {
     y: by,
     vx: 0,
     vy: 0,
+    targetVx: 0,
+    targetVy: 0,
     bob: Math.random() * Math.PI * 2,
     facing: 1,
     hitsTaken: 0,
