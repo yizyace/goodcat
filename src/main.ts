@@ -1,6 +1,5 @@
-// Super Ginger — Kitty Rescue
-// A tiny, peaceful canvas game for very small humans.
-// Controls: arrow keys (or WASD). Catch up to the wandering kittens to rescue them.
+// Super Kitties — Kitty Rescue
+// 1- or 2-player canvas game. Pick a hero, chase the wandering kittens, save them all.
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 const ctx = canvas.getContext("2d")!;
@@ -10,13 +9,28 @@ const W = canvas.width;
 const H = canvas.height;
 const TILE = 64;
 
-type Vec = { x: number; y: number };
+// --- Types ---------------------------------------------------------------
 
-type Hero = Vec & {
-  vx: number;
-  vy: number;
-  facing: 1 | -1;
-  bounce: number; // visual bob phase
+type Vec = { x: number; y: number };
+type GameState = "mode-select" | "character-select" | "playing";
+
+type Character = {
+  id: string;
+  name: string;
+  fur: string;
+  suit: string;
+  mask: string;
+  cape: string;
+  emblem: string;
+  innerEar: string;
+  whisker: string;
+};
+
+type Controls = {
+  up: string[];
+  down: string[];
+  left: string[];
+  right: string[];
 };
 
 type Kitten = Vec & {
@@ -25,10 +39,19 @@ type Kitten = Vec & {
   color: string;
   saved: boolean;
   wiggle: number;
-  // How long until the kitten picks a new wander direction.
   wanderTimer: number;
-  // Held in place by the hero's gravity pulse this frame.
   held: boolean;
+};
+
+type Hero = Vec & {
+  vx: number;
+  vy: number;
+  facing: 1 | -1;
+  bounce: number;
+  character: Character;
+  controls: Controls;
+  label: string;
+  lockedTarget: Kitten | null;
 };
 
 type Particle = Vec & {
@@ -43,46 +66,104 @@ type Particle = Vec & {
   color: string;
 };
 
-const hero: Hero = {
-  x: W / 2,
-  y: H / 2,
-  vx: 0,
-  vy: 0,
-  facing: 1,
-  bounce: 0,
+// --- Characters ----------------------------------------------------------
+
+const CHARACTERS: Character[] = [
+  {
+    id: "sparks",
+    name: "SPARKS",
+    fur: "#ffe066",
+    suit: "#7e57c2",
+    mask: "#ffd54f",
+    cape: "#5e35b1",
+    emblem: "#ffd54f",
+    innerEar: "#ffaecd",
+    whisker: "rgba(0,0,0,0.45)",
+  },
+  {
+    id: "ginny",
+    name: "GINNY",
+    fur: "#ffb066",
+    suit: "#ec407a",
+    mask: "#ff8fb1",
+    cape: "#c2185b",
+    emblem: "#ffffff",
+    innerEar: "#ffaecd",
+    whisker: "rgba(0,0,0,0.45)",
+  },
+  {
+    id: "buddy",
+    name: "BUDDY",
+    fur: "#ffe0b3",
+    suit: "#ff7043",
+    mask: "#ff5722",
+    cape: "#e64a19",
+    emblem: "#ffeb3b",
+    innerEar: "#ffaecd",
+    whisker: "rgba(0,0,0,0.45)",
+  },
+  {
+    id: "bitsy",
+    name: "BITSY",
+    fur: "#ffffff",
+    suit: "#26c6da",
+    mask: "#00acc1",
+    cape: "#0097a7",
+    emblem: "#ffffff",
+    innerEar: "#ffaecd",
+    whisker: "rgba(70,70,70,0.7)",
+  },
+];
+
+const ARROW_CONTROLS: Controls = {
+  up: ["arrowup"],
+  down: ["arrowdown"],
+  left: ["arrowleft"],
+  right: ["arrowright"],
 };
+const WASD_CONTROLS: Controls = {
+  up: ["w"],
+  down: ["s"],
+  left: ["a"],
+  right: ["d"],
+};
+
+// --- State ---------------------------------------------------------------
+
+let state: GameState = "mode-select";
+let mode: 1 | 2 = 1;
+let modeSelectIdx: 0 | 1 = 0;
+let charSelectIdx = 0;
+let charSelectingPlayer = 0;
+let p1Char: Character | null = null;
+let p2Char: Character | null = null;
+
+const players: Hero[] = [];
+const kittens: Kitten[] = [];
+const particles: Particle[] = [];
 
 const KITTEN_COLORS = ["#fff4d6", "#cdb6ff", "#b6f0ff", "#ffd6e8", "#d6ffc7", "#ffe0a3"];
 const PARTICLE_COLORS = ["#ff7ab8", "#ffb3d9", "#ffd166", "#fff3a3", "#b39dff", "#a8e6ff"];
 
-const kittens: Kitten[] = [];
-const particles: Particle[] = [];
-
 let score = 0;
+
+// --- City map ------------------------------------------------------------
 
 const COLS = Math.floor(W / TILE);
 const ROWS = Math.floor(H / TILE);
-// 0 = grass (walkable), 1 = building (blocked), 2 = path (walkable, decorative)
 const map: number[][] = [];
 
 function buildCity(): void {
+  map.length = 0;
   for (let r = 0; r < ROWS; r++) {
     const row: number[] = [];
-    for (let c = 0; c < COLS; c++) {
-      row.push(0);
-    }
+    for (let c = 0; c < COLS; c++) row.push(0);
     map.push(row);
   }
-  // Decorative paths in a soft grid (no longer roads — just stone paths through the park).
   const hPaths = [2, 7];
-  for (const r of hPaths) {
-    for (let c = 0; c < COLS; c++) map[r][c] = 2;
-  }
+  for (const r of hPaths) for (let c = 0; c < COLS; c++) map[r][c] = 2;
   const vPaths = [3, 11];
-  for (const c of vPaths) {
-    for (let r = 0; r < ROWS; r++) map[r][c] = 2;
-  }
-  // Cottage blocks. Slightly fewer/smaller so kittens have more room to wander.
+  for (const c of vPaths) for (let r = 0; r < ROWS; r++) map[r][c] = 2;
   const blockSpots: Vec[] = [
     { x: 1, y: 0 }, { x: 6, y: 0 }, { x: 9, y: 0 }, { x: 13, y: 0 },
     { x: 0, y: 4 }, { x: 5, y: 4 }, { x: 8, y: 4 }, { x: 13, y: 4 },
@@ -107,12 +188,12 @@ function tileAt(x: number, y: number): number {
   if (r < 0 || r >= ROWS || c < 0 || c >= COLS) return 1;
   return map[r][c];
 }
-
 function isBlocked(x: number, y: number): boolean {
   return tileAt(x, y) === 1;
 }
 
 function spawnKittens(): void {
+  kittens.length = 0;
   const targets = 6;
   let placed = 0;
   let tries = 0;
@@ -123,7 +204,7 @@ function spawnKittens(): void {
     if (map[r][c] === 1) continue;
     const x = c * TILE + TILE / 2;
     const y = r * TILE + TILE / 2;
-    if (Math.hypot(x - hero.x, y - hero.y) < 140) continue;
+    if (players.some((p) => Math.hypot(p.x - x, p.y - y) < 140)) continue;
     if (kittens.some((k) => Math.hypot(k.x - x, k.y - y) < 110)) continue;
     kittens.push({
       x,
@@ -143,33 +224,41 @@ function spawnKittens(): void {
 // --- Input ---------------------------------------------------------------
 
 const keys = new Set<string>();
+const justPressed = new Set<string>();
+const GAME_KEYS = new Set([
+  "arrowup", "arrowdown", "arrowleft", "arrowright",
+  "w", "a", "s", "d",
+  "enter", " ", "1", "2",
+]);
 window.addEventListener("keydown", (e) => {
-  keys.add(e.key.toLowerCase());
-  if (
-    [
-      "arrowup",
-      "arrowdown",
-      "arrowleft",
-      "arrowright",
-      " ",
-    ].includes(e.key.toLowerCase())
-  ) {
-    e.preventDefault();
-  }
+  const k = e.key.toLowerCase();
+  if (!keys.has(k)) justPressed.add(k);
+  keys.add(k);
+  if (GAME_KEYS.has(k)) e.preventDefault();
 });
 window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 
-function inputDir(): Vec {
+function consumeJust(key: string): boolean {
+  if (justPressed.has(key)) {
+    justPressed.delete(key);
+    return true;
+  }
+  return false;
+}
+function clearJust(): void {
+  justPressed.clear();
+}
+
+function inputForControls(c: Controls): Vec {
   let dx = 0;
   let dy = 0;
-  if (keys.has("arrowleft") || keys.has("a")) dx -= 1;
-  if (keys.has("arrowright") || keys.has("d")) dx += 1;
-  if (keys.has("arrowup") || keys.has("w")) dy -= 1;
-  if (keys.has("arrowdown") || keys.has("s")) dy += 1;
+  if (c.up.some((k) => keys.has(k))) dy -= 1;
+  if (c.down.some((k) => keys.has(k))) dy += 1;
+  if (c.left.some((k) => keys.has(k))) dx -= 1;
+  if (c.right.some((k) => keys.has(k))) dx += 1;
   if (dx !== 0 && dy !== 0) {
-    const k = Math.SQRT1_2;
-    dx *= k;
-    dy *= k;
+    dx *= Math.SQRT1_2;
+    dy *= Math.SQRT1_2;
   }
   return { x: dx, y: dy };
 }
@@ -210,7 +299,6 @@ function winFanfare(): void {
   notes.forEach((n, i) => setTimeout(() => blip(n, 0.18, "triangle", 0.1), i * 120));
 }
 
-// Sustained gravity-beam hum: low sawtooth + sine harmonic, gain modulated by a 6Hz LFO.
 let beamNodes:
   | { mainGain: GainNode; oscs: OscillatorNode[]; lfo: OscillatorNode }
   | null = null;
@@ -225,7 +313,6 @@ function startBeamSound(): void {
     const osc2 = a.createOscillator();
     osc2.type = "sine";
     osc2.frequency.value = 165;
-    // Low-pass to round off any harshness.
     const filter = a.createBiquadFilter();
     filter.type = "lowpass";
     filter.frequency.value = 600;
@@ -267,13 +354,13 @@ function stopBeamSound(): void {
   beamNodes = null;
 }
 
-// --- Update --------------------------------------------------------------
+// --- Game lifecycle ------------------------------------------------------
 
 const HERO_SPEED = 3.4;
 const HERO_RADIUS = 22;
-const KITTEN_SPEED = 1.3; // markedly slower than the hero so the chase always succeeds
+const KITTEN_SPEED = 1.3;
 const KITTEN_RADIUS = 22;
-const PULSE_RANGE = TILE * 3.2; // hero's gravity pulse: nearest kitten within this range freezes
+const PULSE_RANGE = TILE * 3.2;
 
 function moveWithCollision(
   pos: Vec,
@@ -306,72 +393,172 @@ function moveWithCollision(
   return { x, y, vx, vy };
 }
 
+function startGame(): void {
+  players.length = 0;
+  const charsToUse: Character[] = mode === 1 ? [p1Char!] : [p1Char!, p2Char!];
+  const startPositions: Vec[] = mode === 1
+    ? [{ x: W / 2, y: H / 2 }]
+    : [{ x: W * 0.32, y: H / 2 }, { x: W * 0.68, y: H / 2 }];
+  for (let i = 0; i < charsToUse.length; i++) {
+    players.push({
+      x: startPositions[i].x,
+      y: startPositions[i].y,
+      vx: 0,
+      vy: 0,
+      facing: 1,
+      bounce: 0,
+      character: charsToUse[i],
+      controls: i === 0 ? ARROW_CONTROLS : WASD_CONTROLS,
+      label: `P${i + 1}`,
+      lockedTarget: null,
+    });
+  }
+  score = 0;
+  scoreEl.textContent = "0";
+  particles.length = 0;
+  buildCity();
+  spawnKittens();
+  state = "playing";
+}
+
+// --- Update --------------------------------------------------------------
+
 function update(): void {
-  // Hero movement.
-  const want = inputDir();
-  const targetVx = want.x * HERO_SPEED;
-  const targetVy = want.y * HERO_SPEED;
-  hero.vx += (targetVx - hero.vx) * 0.35;
-  hero.vy += (targetVy - hero.vy) * 0.35;
-  if (Math.abs(hero.vx) > 0.05) hero.facing = hero.vx > 0 ? 1 : -1;
+  if (state === "mode-select") updateModeSelect();
+  else if (state === "character-select") updateCharSelect();
+  else updatePlaying();
+  clearJust();
+}
 
-  // Hero clips through buildings — only the screen edges stop her.
-  hero.x = Math.max(HERO_RADIUS, Math.min(W - HERO_RADIUS, hero.x + hero.vx));
-  hero.y = Math.max(HERO_RADIUS, Math.min(H - HERO_RADIUS, hero.y + hero.vy));
-  hero.bounce += Math.hypot(hero.vx, hero.vy) * 0.08;
+function updateModeSelect(): void {
+  if (consumeJust("arrowleft") || consumeJust("a") || consumeJust("1")) {
+    modeSelectIdx = 0;
+  }
+  if (consumeJust("arrowright") || consumeJust("d") || consumeJust("2")) {
+    modeSelectIdx = 1;
+  }
+  if (consumeJust("enter") || consumeJust(" ")) {
+    mode = modeSelectIdx === 0 ? 1 : 2;
+    state = "character-select";
+    charSelectingPlayer = 0;
+    charSelectIdx = 0;
+    p1Char = null;
+    p2Char = null;
+  }
+}
 
-  // The hero's gravity pulse only locks onto the single nearest kitten in range.
-  let lockedTarget: Kitten | null = null;
-  let lockedDist = PULSE_RANGE;
-  for (const k of kittens) {
-    if (k.saved) continue;
-    const d = Math.hypot(k.x - hero.x, k.y - hero.y);
-    if (d < lockedDist) {
-      lockedDist = d;
-      lockedTarget = k;
+function isCharTaken(idx: number): boolean {
+  return charSelectingPlayer === 1 && p1Char === CHARACTERS[idx];
+}
+
+function updateCharSelect(): void {
+  let dir = 0;
+  if (consumeJust("arrowright") || consumeJust("d")) dir = 1;
+  else if (consumeJust("arrowleft") || consumeJust("a")) dir = -1;
+  if (dir !== 0) {
+    let next = charSelectIdx;
+    for (let i = 0; i < CHARACTERS.length; i++) {
+      next = (next + dir + CHARACTERS.length) % CHARACTERS.length;
+      if (!isCharTaken(next)) break;
+    }
+    charSelectIdx = next;
+  }
+  if (consumeJust("enter") || consumeJust(" ")) {
+    if (isCharTaken(charSelectIdx)) return;
+    if (charSelectingPlayer === 0) {
+      p1Char = CHARACTERS[charSelectIdx];
+      if (mode === 2) {
+        charSelectingPlayer = 1;
+        let next = (charSelectIdx + 1) % CHARACTERS.length;
+        while (CHARACTERS[next] === p1Char) next = (next + 1) % CHARACTERS.length;
+        charSelectIdx = next;
+      } else {
+        startGame();
+      }
+    } else {
+      p2Char = CHARACTERS[charSelectIdx];
+      startGame();
     }
   }
-  if (lockedTarget) startBeamSound();
+}
+
+function updatePlaying(): void {
+  // Per-player movement.
+  for (const p of players) {
+    const want = inputForControls(p.controls);
+    const tvx = want.x * HERO_SPEED;
+    const tvy = want.y * HERO_SPEED;
+    p.vx += (tvx - p.vx) * 0.35;
+    p.vy += (tvy - p.vy) * 0.35;
+    if (Math.abs(p.vx) > 0.05) p.facing = p.vx > 0 ? 1 : -1;
+    p.x = Math.max(HERO_RADIUS, Math.min(W - HERO_RADIUS, p.x + p.vx));
+    p.y = Math.max(HERO_RADIUS, Math.min(H - HERO_RADIUS, p.y + p.vy));
+    p.bounce += Math.hypot(p.vx, p.vy) * 0.08;
+  }
+
+  // Per-player gravity-pulse target lock.
+  for (const p of players) {
+    let target: Kitten | null = null;
+    let dist = PULSE_RANGE;
+    for (const k of kittens) {
+      if (k.saved) continue;
+      const d = Math.hypot(k.x - p.x, k.y - p.y);
+      if (d < dist) {
+        dist = d;
+        target = k;
+      }
+    }
+    p.lockedTarget = target;
+  }
+  for (const k of kittens) k.held = false;
+  for (const p of players) if (p.lockedTarget) p.lockedTarget.held = true;
+
+  if (players.some((p) => p.lockedTarget)) startBeamSound();
   else stopBeamSound();
 
-  // Kittens wander — unless they're the one caught in the hero's gravity pulse.
+  // Kitten wander + flee.
   for (const k of kittens) {
     if (k.saved) continue;
     k.wiggle += 0.12;
-    k.held = k === lockedTarget;
     if (k.held) {
       k.vx = 0;
       k.vy = 0;
-      // Reset wander timer so they pick a fresh direction the moment they're released.
       k.wanderTimer = 0;
       continue;
     }
     k.wanderTimer--;
     if (k.wanderTimer <= 0) {
-      // Pick a new direction. 25% chance to pause briefly.
       if (Math.random() < 0.25) {
         k.vx = 0;
         k.vy = 0;
         k.wanderTimer = 30 + Math.random() * 40;
       } else {
-        // Tend to flee gently from the hero so chasing feels real,
-        // but mostly random so they don't all stream the same way.
-        const dx = k.x - hero.x;
-        const dy = k.y - hero.y;
-        const dist = Math.hypot(dx, dy) || 1;
-        const fleeWeight = dist < 220 ? 0.6 : 0.15;
+        // Flee from the nearest player.
+        let nearest = players[0];
+        let nd = Math.hypot(nearest.x - k.x, nearest.y - k.y);
+        for (let i = 1; i < players.length; i++) {
+          const d = Math.hypot(players[i].x - k.x, players[i].y - k.y);
+          if (d < nd) {
+            nd = d;
+            nearest = players[i];
+          }
+        }
+        const dx = k.x - nearest.x;
+        const dy = k.y - nearest.y;
+        const dl = Math.hypot(dx, dy) || 1;
+        const fleeWeight = nd < 220 ? 0.6 : 0.15;
         const rx = Math.random() * 2 - 1;
         const ry = Math.random() * 2 - 1;
-        const dirX = (dx / dist) * fleeWeight + rx * (1 - fleeWeight);
-        const dirY = (dy / dist) * fleeWeight + ry * (1 - fleeWeight);
-        const dl = Math.hypot(dirX, dirY) || 1;
-        k.vx = (dirX / dl) * KITTEN_SPEED;
-        k.vy = (dirY / dl) * KITTEN_SPEED;
+        const dirX = (dx / dl) * fleeWeight + rx * (1 - fleeWeight);
+        const dirY = (dy / dl) * fleeWeight + ry * (1 - fleeWeight);
+        const dl2 = Math.hypot(dirX, dirY) || 1;
+        k.vx = (dirX / dl2) * KITTEN_SPEED;
+        k.vy = (dirY / dl2) * KITTEN_SPEED;
         k.wanderTimer = 60 + Math.random() * 90;
       }
     }
     const km = moveWithCollision(k, k.vx, k.vy, KITTEN_RADIUS);
-    if (km.vx === 0 && k.vx !== 0) k.wanderTimer = 0; // bumped a wall, repick
+    if (km.vx === 0 && k.vx !== 0) k.wanderTimer = 0;
     if (km.vy === 0 && k.vy !== 0) k.wanderTimer = 0;
     k.x = km.x;
     k.y = km.y;
@@ -379,31 +566,35 @@ function update(): void {
     k.vy = km.vy;
   }
 
-  // Rescue check.
+  // Rescue: any player who touches a kitten saves it.
   for (const k of kittens) {
     if (k.saved) continue;
-    if (Math.hypot(k.x - hero.x, k.y - hero.y) < HERO_RADIUS + KITTEN_RADIUS - 8) {
-      k.saved = true;
-      score++;
-      scoreEl.textContent = String(score);
-      rescueChime();
-      emitRescueBurst(k.x, k.y);
-      if (kittens.every((kk) => kk.saved)) {
-        winFanfare();
-        setTimeout(resetRound, 1400);
+    for (const p of players) {
+      if (Math.hypot(k.x - p.x, k.y - p.y) < HERO_RADIUS + KITTEN_RADIUS - 8) {
+        k.saved = true;
+        score++;
+        scoreEl.textContent = String(score);
+        rescueChime();
+        emitRescueBurst(k.x, k.y);
+        if (kittens.every((kk) => kk.saved)) {
+          winFanfare();
+          stopBeamSound();
+          setTimeout(resetRound, 1400);
+        }
+        break;
       }
     }
   }
 
-  // Particles drift gently UPWARD — light, floaty, celebratory.
-  for (const p of particles) {
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vy += -0.02; // negative gravity = float up
-    p.vx *= 0.99;
-    p.vy *= 0.99;
-    p.rot += p.vrot;
-    p.life--;
+  // Particles.
+  for (const pr of particles) {
+    pr.x += pr.vx;
+    pr.y += pr.vy;
+    pr.vy += -0.02;
+    pr.vx *= 0.99;
+    pr.vy *= 0.99;
+    pr.rot += pr.vrot;
+    pr.life--;
   }
   for (let i = particles.length - 1; i >= 0; i--) {
     if (particles[i].life <= 0) particles.splice(i, 1);
@@ -411,35 +602,29 @@ function update(): void {
 }
 
 function emitRescueBurst(x: number, y: number): void {
-  // Floating hearts.
   for (let i = 0; i < 10; i++) {
     const angle = (Math.PI * 2 * i) / 10 + Math.random() * 0.4;
     const speed = 1 + Math.random() * 1.2;
     particles.push({
-      x,
-      y,
+      x, y,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed - 1.2,
-      life: 90,
-      maxLife: 90,
+      life: 90, maxLife: 90,
       rot: Math.random() * Math.PI * 2,
       vrot: (Math.random() - 0.5) * 0.08,
       scale: 0.8 + Math.random() * 0.6,
       kind: "heart",
-      color: PARTICLE_COLORS[Math.floor(Math.random() * 3)], // pinks/yellows
+      color: PARTICLE_COLORS[Math.floor(Math.random() * 3)],
     });
   }
-  // Stars.
   for (let i = 0; i < 8; i++) {
     const angle = Math.random() * Math.PI * 2;
     const speed = 0.6 + Math.random() * 1.6;
     particles.push({
-      x,
-      y,
+      x, y,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed - 0.6,
-      life: 70,
-      maxLife: 70,
+      life: 70, maxLife: 70,
       rot: Math.random() * Math.PI * 2,
       vrot: (Math.random() - 0.5) * 0.18,
       scale: 0.7 + Math.random() * 0.7,
@@ -447,19 +632,15 @@ function emitRescueBurst(x: number, y: number): void {
       color: PARTICLE_COLORS[3 + Math.floor(Math.random() * 3)],
     });
   }
-  // Tiny sparkle dots.
   for (let i = 0; i < 14; i++) {
     const angle = Math.random() * Math.PI * 2;
     const speed = 0.4 + Math.random() * 2;
     particles.push({
-      x,
-      y,
+      x, y,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed - 0.4,
-      life: 50,
-      maxLife: 50,
-      rot: 0,
-      vrot: 0,
+      life: 50, maxLife: 50,
+      rot: 0, vrot: 0,
       scale: 0.5 + Math.random() * 0.6,
       kind: "sparkle",
       color: PARTICLE_COLORS[Math.floor(Math.random() * PARTICLE_COLORS.length)],
@@ -468,11 +649,195 @@ function emitRescueBurst(x: number, y: number): void {
 }
 
 function resetRound(): void {
-  kittens.length = 0;
   spawnKittens();
 }
 
 // --- Render --------------------------------------------------------------
+
+function render(): void {
+  if (state === "mode-select") renderModeSelect();
+  else if (state === "character-select") renderCharSelect();
+  else renderPlaying();
+}
+
+function drawTitleBackground(): void {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#1d1556");
+  grad.addColorStop(1, "#46226a");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  // drifting sparkles
+  for (let i = 0; i < 60; i++) {
+    const x = ((i * 137 + performance.now() / 50) % W + W) % W;
+    const y = (i * 89) % H;
+    ctx.fillStyle = `rgba(255,255,255,${0.15 + (i % 3) * 0.1})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function roundRect(x: number, y: number, w: number, h: number, r: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function renderModeSelect(): void {
+  drawTitleBackground();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 64px system-ui";
+  ctx.fillText("SUPER KITTIES", W / 2, 100);
+  ctx.fillStyle = "#ffd0e8";
+  ctx.font = "bold 28px system-ui";
+  ctx.fillText("Kitty Rescue!", W / 2, 150);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 22px system-ui";
+  ctx.fillText("How many players?", W / 2, 240);
+
+  const optionsY = H / 2 + 40;
+  const labels = ["1 PLAYER", "2 PLAYERS"];
+  const xs = [W * 0.3, W * 0.7];
+  for (let i = 0; i < 2; i++) {
+    const selected = modeSelectIdx === i;
+    const cx = xs[i];
+    const cy = optionsY;
+    ctx.fillStyle = selected ? "#ff5fb0" : "rgba(255,255,255,0.12)";
+    roundRect(cx - 130, cy - 50, 260, 100, 16);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 36px system-ui";
+    ctx.fillText(labels[i], cx, cy);
+    if (selected) {
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 4;
+      roundRect(cx - 130, cy - 50, 260, 100, 16);
+      ctx.stroke();
+    }
+  }
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "20px system-ui";
+  ctx.fillText("← → to choose  ·  ENTER to continue", W / 2, H - 60);
+}
+
+function renderCharSelect(): void {
+  drawTitleBackground();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 36px system-ui";
+  ctx.fillText(`PLAYER ${charSelectingPlayer + 1} — Choose your hero!`, W / 2, 70);
+
+  const cardW = 180;
+  const cardH = 280;
+  const gap = 24;
+  const totalW = cardW * 4 + gap * 3;
+  const startX = (W - totalW) / 2;
+  const cardY = (H - cardH) / 2 + 30;
+
+  for (let i = 0; i < CHARACTERS.length; i++) {
+    const c = CHARACTERS[i];
+    const x = startX + i * (cardW + gap);
+    const taken = isCharTaken(i);
+    const selected = charSelectIdx === i;
+
+    ctx.fillStyle = taken ? "rgba(0,0,0,0.5)" : "rgba(255,255,255,0.12)";
+    roundRect(x, cardY, cardW, cardH, 14);
+    ctx.fill();
+
+    if (selected) {
+      ctx.shadowColor = "rgba(255, 213, 79, 0.95)";
+      ctx.shadowBlur = 22;
+      ctx.strokeStyle = "#ffd54f";
+      ctx.lineWidth = 5;
+      roundRect(x, cardY, cardW, cardH, 14);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    ctx.fillStyle = taken ? "#888" : c.suit;
+    ctx.font = "bold 30px system-ui";
+    ctx.fillText(c.name, x + cardW / 2, cardY + 36);
+
+    ctx.save();
+    ctx.translate(x + cardW / 2, cardY + cardH / 2 + 30);
+    ctx.scale(2.4, 2.4);
+    if (taken) ctx.globalAlpha = 0.35;
+    drawHeroBody(c, 1);
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    if (taken) {
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 22px system-ui";
+      ctx.fillText("TAKEN", x + cardW / 2, cardY + cardH - 28);
+    }
+  }
+
+  if (mode === 2 && p1Char) {
+    ctx.fillStyle = "#ffd0e8";
+    ctx.font = "20px system-ui";
+    ctx.fillText(`P1 picked ${p1Char.name}`, W / 2, H - 100);
+  }
+  ctx.fillStyle = "#fff";
+  ctx.font = "20px system-ui";
+  ctx.fillText("← → to choose  ·  ENTER to lock in", W / 2, H - 50);
+}
+
+function renderPlaying(): void {
+  ctx.fillStyle = "#cfeeff";
+  ctx.fillRect(0, 0, W, H);
+  drawCity();
+
+  for (const p of players) {
+    if (p.lockedTarget) drawGravityBeam(p, p.lockedTarget);
+  }
+
+  for (const k of kittens) drawKitten(k);
+  for (const p of players) drawHero(p);
+  for (const pr of particles) drawParticle(pr);
+
+  if (mode === 2) {
+    for (const p of players) {
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = "bold 14px system-ui";
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 4;
+      ctx.strokeText(p.label, p.x, p.y - 50);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(p.label, p.x, p.y - 50);
+    }
+  }
+
+  if (kittens.length > 0 && kittens.every((k) => k.saved)) {
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(0, H / 2 - 60, W, 120);
+    ctx.fillStyle = "#ffd0e8";
+    ctx.font = "bold 56px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("All kitties saved!", W / 2, H / 2);
+  }
+}
+
+// --- Drawing helpers -----------------------------------------------------
 
 function drawCity(): void {
   for (let r = 0; r < ROWS; r++) {
@@ -483,7 +848,6 @@ function drawCity(): void {
       if (t === 0) {
         ctx.fillStyle = (r + c) % 2 === 0 ? "#9be29b" : "#84d488";
         ctx.fillRect(x, y, TILE, TILE);
-        // tiny flower dots
         if ((r * 3 + c * 5) % 7 === 0) {
           ctx.fillStyle = "#fff";
           ctx.beginPath();
@@ -496,7 +860,6 @@ function drawCity(): void {
           ctx.fill();
         }
       } else if (t === 2) {
-        // Soft stone path instead of dark road.
         ctx.fillStyle = "#e9dec1";
         ctx.fillRect(x, y, TILE, TILE);
         ctx.fillStyle = "#d6c79f";
@@ -504,13 +867,10 @@ function drawCity(): void {
         ctx.fillStyle = "#f1ead2";
         ctx.fillRect(x + 10, y + 10, TILE - 20, TILE - 20);
       } else if (t === 1) {
-        // Cottage with rounded top.
-        const palette = ((r * 7 + c * 13) % 6);
+        const palette = (r * 7 + c * 13) % 6;
         const colors = ["#e57aa8", "#f0a04b", "#7ec8ff", "#bba2ff", "#ffd166", "#86e3a3"];
-        // base
         ctx.fillStyle = colors[palette];
         ctx.fillRect(x + 6, y + 16, TILE - 12, TILE - 22);
-        // roof
         ctx.fillStyle = "#7a4f3a";
         ctx.beginPath();
         ctx.moveTo(x + 2, y + 22);
@@ -518,14 +878,11 @@ function drawCity(): void {
         ctx.lineTo(x + TILE - 2, y + 22);
         ctx.closePath();
         ctx.fill();
-        // door
         ctx.fillStyle = "#5a3a2a";
         ctx.fillRect(x + TILE / 2 - 6, y + TILE - 18, 12, 12);
-        // window
         ctx.fillStyle = "#fffbe6";
         ctx.fillRect(x + 12, y + 26, 12, 10);
         ctx.fillRect(x + TILE - 24, y + 26, 12, 10);
-        // window cross
         ctx.strokeStyle = "rgba(0,0,0,0.3)";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -539,15 +896,15 @@ function drawCity(): void {
   }
 }
 
-function drawHero(): void {
+// Draws the hero shape centered at the current ctx origin, no translate.
+// Used by drawHero (in-game) and the character-select cards.
+function drawHeroBody(c: Character, facing: 1 | -1, bobY = 0): void {
   ctx.save();
-  ctx.translate(hero.x, hero.y);
-  const bob = Math.sin(hero.bounce) * 2;
-  ctx.translate(0, bob);
-  ctx.scale(hero.facing, 1);
+  ctx.translate(0, bobY);
+  ctx.scale(facing, 1);
 
   // Cape.
-  ctx.fillStyle = "#ff5fb0";
+  ctx.fillStyle = c.cape;
   ctx.beginPath();
   ctx.moveTo(-6, -8);
   ctx.lineTo(-26, 6);
@@ -556,65 +913,48 @@ function drawHero(): void {
   ctx.closePath();
   ctx.fill();
 
-  // Body.
-  ctx.fillStyle = "#ff9a3d";
+  // Body suit.
+  ctx.fillStyle = c.suit;
   ctx.beginPath();
   ctx.ellipse(0, 6, 18, 16, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Stripes.
-  ctx.fillStyle = "rgba(180, 80, 0, 0.4)";
-  ctx.fillRect(-12, 2, 4, 8);
-  ctx.fillRect(-2, 0, 4, 10);
-  ctx.fillRect(8, 4, 4, 6);
+  // Belt accent.
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
+  ctx.fillRect(-16, 12, 32, 3);
 
   // Heart emblem.
-  ctx.fillStyle = "#ff3d8a";
+  ctx.fillStyle = c.emblem;
   ctx.beginPath();
-  ctx.arc(-3, 8, 3, 0, Math.PI * 2);
-  ctx.arc(3, 8, 3, 0, Math.PI * 2);
-  ctx.moveTo(-6, 9);
-  ctx.lineTo(0, 15);
-  ctx.lineTo(6, 9);
+  ctx.arc(-3, 6, 3, 0, Math.PI * 2);
+  ctx.arc(3, 6, 3, 0, Math.PI * 2);
+  ctx.moveTo(-6, 7);
+  ctx.lineTo(0, 13);
+  ctx.lineTo(6, 7);
   ctx.closePath();
   ctx.fill();
 
   // Head.
-  ctx.fillStyle = "#ffb066";
+  ctx.fillStyle = c.fur;
   ctx.beginPath();
   ctx.arc(0, -10, 16, 0, Math.PI * 2);
   ctx.fill();
 
-  // Ears.
-  ctx.fillStyle = "#ff9a3d";
+  // Ears outer.
+  ctx.fillStyle = c.fur;
   ctx.beginPath();
-  ctx.moveTo(-14, -18);
-  ctx.lineTo(-6, -28);
-  ctx.lineTo(-4, -16);
-  ctx.closePath();
+  ctx.moveTo(-14, -18); ctx.lineTo(-6, -28); ctx.lineTo(-4, -16); ctx.closePath();
+  ctx.moveTo(14, -18); ctx.lineTo(6, -28); ctx.lineTo(4, -16); ctx.closePath();
   ctx.fill();
+  // Inner ear.
+  ctx.fillStyle = c.innerEar;
   ctx.beginPath();
-  ctx.moveTo(14, -18);
-  ctx.lineTo(6, -28);
-  ctx.lineTo(4, -16);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#ff8fc4";
-  ctx.beginPath();
-  ctx.moveTo(-11, -19);
-  ctx.lineTo(-7, -24);
-  ctx.lineTo(-6, -18);
-  ctx.closePath();
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(11, -19);
-  ctx.lineTo(7, -24);
-  ctx.lineTo(6, -18);
-  ctx.closePath();
+  ctx.moveTo(-11, -19); ctx.lineTo(-7, -24); ctx.lineTo(-6, -18); ctx.closePath();
+  ctx.moveTo(11, -19); ctx.lineTo(7, -24); ctx.lineTo(6, -18); ctx.closePath();
   ctx.fill();
 
   // Mask.
-  ctx.fillStyle = "#ff3d8a";
+  ctx.fillStyle = c.mask;
   ctx.beginPath();
   ctx.moveTo(-13, -12);
   ctx.lineTo(13, -12);
@@ -625,6 +965,7 @@ function drawHero(): void {
   ctx.closePath();
   ctx.fill();
 
+  // Eyes.
   ctx.fillStyle = "#fff";
   ctx.beginPath();
   ctx.arc(-6, -9, 2.4, 0, Math.PI * 2);
@@ -636,6 +977,7 @@ function drawHero(): void {
   ctx.arc(6, -9, 1.1, 0, Math.PI * 2);
   ctx.fill();
 
+  // Nose.
   ctx.fillStyle = "#ff3d8a";
   ctx.beginPath();
   ctx.moveTo(-2, -3);
@@ -644,6 +986,7 @@ function drawHero(): void {
   ctx.closePath();
   ctx.fill();
 
+  // Mouth.
   ctx.strokeStyle = "#5a2200";
   ctx.lineWidth = 1.2;
   ctx.beginPath();
@@ -653,7 +996,8 @@ function drawHero(): void {
   ctx.quadraticCurveTo(3, 2, 5, 0);
   ctx.stroke();
 
-  ctx.strokeStyle = "#fff";
+  // Whiskers.
+  ctx.strokeStyle = c.whisker;
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(-6, -2); ctx.lineTo(-14, -3);
@@ -662,7 +1006,8 @@ function drawHero(): void {
   ctx.moveTo(6, -1); ctx.lineTo(14, 0);
   ctx.stroke();
 
-  ctx.strokeStyle = "#ff9a3d";
+  // Tail.
+  ctx.strokeStyle = c.fur;
   ctx.lineWidth = 6;
   ctx.lineCap = "round";
   ctx.beginPath();
@@ -673,101 +1018,32 @@ function drawHero(): void {
   ctx.restore();
 }
 
-function drawGravityBeam(from: Vec, to: Vec): void {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist < 1) return;
-  const angle = Math.atan2(dy, dx);
-
+function drawHero(h: Hero): void {
   ctx.save();
-  ctx.translate(from.x, from.y);
-  ctx.rotate(angle);
-
-  const t = performance.now() / 180;
-  const freq = 0.085; // wavelength along the beam
-  const amp = 9;
-  const steps = Math.max(24, Math.floor(dist / 3));
-
-  // Soft outer halo down the spine of the beam.
-  const halo = ctx.createLinearGradient(0, 0, dist, 0);
-  halo.addColorStop(0.0, "rgba(170, 110, 255, 0.0)");
-  halo.addColorStop(0.2, "rgba(170, 110, 255, 0.35)");
-  halo.addColorStop(0.8, "rgba(170, 110, 255, 0.35)");
-  halo.addColorStop(1.0, "rgba(170, 110, 255, 0.0)");
-  ctx.strokeStyle = halo;
-  ctx.lineWidth = 18;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(dist, 0);
-  ctx.stroke();
-
-  // Glowing helix — uses canvas shadow to bloom each strand in purple.
-  ctx.shadowColor = "rgba(190, 110, 255, 0.95)";
-  ctx.shadowBlur = 14;
-
-  // Strand A.
-  ctx.strokeStyle = "rgba(214, 168, 255, 0.95)";
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  for (let i = 0; i <= steps; i++) {
-    const x = (i / steps) * dist;
-    const y = Math.sin(x * freq - t) * amp;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  // Strand B — π out of phase, slightly different shade.
-  ctx.strokeStyle = "rgba(168, 110, 240, 0.95)";
-  ctx.beginPath();
-  for (let i = 0; i <= steps; i++) {
-    const x = (i / steps) * dist;
-    const y = Math.sin(x * freq - t + Math.PI) * amp;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  ctx.shadowBlur = 0;
-
-  // Bright nodes where the strands cross (sin = 0 → x*freq − t = nπ).
-  const spacing = Math.PI / freq;
-  let firstCross = ((t % Math.PI) / freq);
-  if (firstCross < 0) firstCross += spacing;
-  for (let x = firstCross; x < dist; x += spacing) {
-    const pulse = 0.7 + Math.sin(t * 3 + x * 0.05) * 0.3;
-    ctx.fillStyle = `rgba(240, 215, 255, ${pulse})`;
-    ctx.beginPath();
-    ctx.arc(x, 0, 2.6, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
+  ctx.translate(h.x, h.y);
+  drawHeroBody(h.character, h.facing, Math.sin(h.bounce) * 2);
   ctx.restore();
 }
 
 function drawKitten(k: Kitten): void {
   if (k.saved) return;
 
-  // Gravity-pulse aura — only when held by the hero's pulse field.
+  // Gravity-pulse aura.
   if (k.held) {
     const t = performance.now() / 700;
-    // Two outward-traveling rings, offset by half a cycle.
     for (const offset of [0, 0.5]) {
       const phase = (t + offset) % 1;
       const radius = 22 + phase * 30;
       const alpha = (1 - phase) * 0.45;
-      ctx.strokeStyle = `rgba(255, 122, 184, ${alpha})`;
+      ctx.strokeStyle = `rgba(190, 110, 255, ${alpha})`;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(k.x, k.y, radius, 0, Math.PI * 2);
       ctx.stroke();
     }
-    // Soft inner glow.
     const glow = ctx.createRadialGradient(k.x, k.y, 0, k.x, k.y, 30);
-    glow.addColorStop(0, "rgba(255, 122, 184, 0.22)");
-    glow.addColorStop(1, "rgba(255, 122, 184, 0)");
+    glow.addColorStop(0, "rgba(190, 110, 255, 0.22)");
+    glow.addColorStop(1, "rgba(190, 110, 255, 0)");
     ctx.fillStyle = glow;
     ctx.beginPath();
     ctx.arc(k.x, k.y, 30, 0, Math.PI * 2);
@@ -775,20 +1051,16 @@ function drawKitten(k: Kitten): void {
   }
 
   ctx.save();
-  // Face the way they're moving.
   const facing: 1 | -1 = k.vx < -0.05 ? -1 : 1;
   const bob = Math.sin(k.wiggle) * 2;
   ctx.translate(k.x, k.y + bob);
   ctx.scale(facing, 1);
-  // Scale up — make the kittens prominent.
   ctx.scale(1.45, 1.45);
 
-  // Body.
   ctx.fillStyle = k.color;
   ctx.beginPath();
   ctx.ellipse(0, 4, 14, 11, 0, 0, Math.PI * 2);
   ctx.fill();
-  // Tail (curled up).
   ctx.strokeStyle = k.color;
   ctx.lineWidth = 4;
   ctx.lineCap = "round";
@@ -796,23 +1068,19 @@ function drawKitten(k: Kitten): void {
   ctx.moveTo(11, 2);
   ctx.quadraticCurveTo(20, -4, 16, -10);
   ctx.stroke();
-  // Head.
   ctx.fillStyle = k.color;
   ctx.beginPath();
   ctx.arc(0, -6, 11, 0, Math.PI * 2);
   ctx.fill();
-  // Ears.
   ctx.beginPath();
   ctx.moveTo(-9, -12); ctx.lineTo(-4, -18); ctx.lineTo(-3, -10); ctx.closePath();
   ctx.moveTo(9, -12); ctx.lineTo(4, -18); ctx.lineTo(3, -10); ctx.closePath();
   ctx.fill();
-  // Inner ear pink.
   ctx.fillStyle = "#ff9fc7";
   ctx.beginPath();
   ctx.moveTo(-7, -12); ctx.lineTo(-5, -16); ctx.lineTo(-4, -11); ctx.closePath();
   ctx.moveTo(7, -12); ctx.lineTo(5, -16); ctx.lineTo(4, -11); ctx.closePath();
   ctx.fill();
-  // Eyes — big, sparkly.
   ctx.fillStyle = "#222";
   ctx.beginPath();
   ctx.arc(-4, -6, 2.2, 0, Math.PI * 2);
@@ -823,7 +1091,6 @@ function drawKitten(k: Kitten): void {
   ctx.arc(-3.2, -6.8, 0.8, 0, Math.PI * 2);
   ctx.arc(4.8, -6.8, 0.8, 0, Math.PI * 2);
   ctx.fill();
-  // Nose.
   ctx.fillStyle = "#ff7aa8";
   ctx.beginPath();
   ctx.moveTo(-1.5, -3);
@@ -831,7 +1098,6 @@ function drawKitten(k: Kitten): void {
   ctx.lineTo(0, -1.5);
   ctx.closePath();
   ctx.fill();
-  // Smile.
   ctx.strokeStyle = "#5a2200";
   ctx.lineWidth = 0.8;
   ctx.beginPath();
@@ -840,7 +1106,6 @@ function drawKitten(k: Kitten): void {
   ctx.moveTo(0, -1.5);
   ctx.quadraticCurveTo(2, 0, 3, -1);
   ctx.stroke();
-  // Whiskers.
   ctx.strokeStyle = "rgba(0,0,0,0.4)";
   ctx.lineWidth = 0.6;
   ctx.beginPath();
@@ -852,7 +1117,6 @@ function drawKitten(k: Kitten): void {
 
   ctx.restore();
 
-  // Floating heart bubble above each kitten — friendlier than "!".
   ctx.save();
   ctx.translate(k.x + 18, k.y - 28 + Math.sin(k.wiggle * 1.2) * 2);
   drawHeart(0, 0, 0, 0.55, "#ff7ab8");
@@ -871,7 +1135,6 @@ function drawHeart(x: number, y: number, rot: number, scale: number, color: stri
   ctx.bezierCurveTo(8, -14, 12, -6, 0, 4);
   ctx.closePath();
   ctx.fill();
-  // little highlight
   ctx.fillStyle = "rgba(255,255,255,0.6)";
   ctx.beginPath();
   ctx.ellipse(-3, -6, 1.6, 2.2, 0.5, 0, Math.PI * 2);
@@ -899,45 +1162,87 @@ function drawStar(x: number, y: number, rot: number, scale: number, color: strin
   ctx.restore();
 }
 
+function drawGravityBeam(from: Vec, to: Vec): void {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist < 1) return;
+  const angle = Math.atan2(dy, dx);
+
+  ctx.save();
+  ctx.translate(from.x, from.y);
+  ctx.rotate(angle);
+
+  const t = performance.now() / 180;
+  const freq = 0.085;
+  const amp = 9;
+  const steps = Math.max(24, Math.floor(dist / 3));
+
+  const halo = ctx.createLinearGradient(0, 0, dist, 0);
+  halo.addColorStop(0.0, "rgba(170, 110, 255, 0.0)");
+  halo.addColorStop(0.2, "rgba(170, 110, 255, 0.35)");
+  halo.addColorStop(0.8, "rgba(170, 110, 255, 0.35)");
+  halo.addColorStop(1.0, "rgba(170, 110, 255, 0.0)");
+  ctx.strokeStyle = halo;
+  ctx.lineWidth = 18;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(dist, 0);
+  ctx.stroke();
+
+  ctx.shadowColor = "rgba(190, 110, 255, 0.95)";
+  ctx.shadowBlur = 14;
+
+  ctx.strokeStyle = "rgba(214, 168, 255, 0.95)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const x = (i / steps) * dist;
+    const y = Math.sin(x * freq - t) * amp;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(168, 110, 240, 0.95)";
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const x = (i / steps) * dist;
+    const y = Math.sin(x * freq - t + Math.PI) * amp;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+
+  const spacing = Math.PI / freq;
+  let firstCross = (t % Math.PI) / freq;
+  if (firstCross < 0) firstCross += spacing;
+  for (let x = firstCross; x < dist; x += spacing) {
+    const pulse = 0.7 + Math.sin(t * 3 + x * 0.05) * 0.3;
+    ctx.fillStyle = `rgba(240, 215, 255, ${pulse})`;
+    ctx.beginPath();
+    ctx.arc(x, 0, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
 function drawParticle(p: Particle): void {
   const a = Math.max(0, Math.min(1, p.life / p.maxLife));
   ctx.globalAlpha = a;
-  if (p.kind === "heart") {
-    drawHeart(p.x, p.y, p.rot, p.scale, p.color);
-  } else if (p.kind === "star") {
-    drawStar(p.x, p.y, p.rot, p.scale, p.color);
-  } else {
-    // sparkle dot
+  if (p.kind === "heart") drawHeart(p.x, p.y, p.rot, p.scale, p.color);
+  else if (p.kind === "star") drawStar(p.x, p.y, p.rot, p.scale, p.color);
+  else {
     ctx.fillStyle = p.color;
     ctx.beginPath();
     ctx.arc(p.x, p.y, 2.5 * p.scale, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
-}
-
-function render(): void {
-  ctx.fillStyle = "#cfeeff";
-  ctx.fillRect(0, 0, W, H);
-  drawCity();
-
-  // Beam to the held kitten (under the characters so endpoints sit on top).
-  const held = kittens.find((k) => k.held && !k.saved);
-  if (held) drawGravityBeam(hero, held);
-
-  for (const k of kittens) drawKitten(k);
-  drawHero();
-  for (const p of particles) drawParticle(p);
-
-  if (kittens.length > 0 && kittens.every((k) => k.saved)) {
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
-    ctx.fillRect(0, H / 2 - 60, W, 120);
-    ctx.fillStyle = "#ffd0e8";
-    ctx.font = "bold 56px system-ui";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("All kitties saved!", W / 2, H / 2);
-  }
 }
 
 // --- Loop ----------------------------------------------------------------
@@ -948,6 +1253,4 @@ function frame(): void {
   requestAnimationFrame(frame);
 }
 
-buildCity();
-spawnKittens();
 frame();
