@@ -188,12 +188,19 @@ const players: Hero[] = [];
 const kittens: Kitten[] = [];
 const particles: Particle[] = [];
 
-let powerUp: PowerUp | null = null;
+const powerUps: PowerUp[] = [];
 let nextPowerUpSpawnTime = 0;
 const POWERUP_INTERVAL_MS = 30_000;
 // Testing: spawn the first orb immediately so we don't wait between iterations.
 const POWERUP_FIRST_DELAY_MS = 0;
 const POWERUP_PICKUP_RADIUS = 26;
+// 2P mode gets twice as many simultaneous orbs and twice the spawn frequency.
+function powerUpCap(): number {
+  return mode === 2 ? 2 : 1;
+}
+function powerUpIntervalMs(): number {
+  return mode === 2 ? POWERUP_INTERVAL_MS / 2 : POWERUP_INTERVAL_MS;
+}
 
 // Power-up durations / parameters per character.
 const BITSY_DURATION_MS = 8_000;
@@ -559,9 +566,9 @@ function startGame(): void {
   score = 0;
   scoreEl.textContent = "0";
   particles.length = 0;
-  powerUp = null;
+  powerUps.length = 0;
   // First power-up arrives quickly so play feels eventful from the start;
-  // subsequent ones come on the regular 30s cycle.
+  // subsequent ones come on the regular cycle (halved in 2P).
   nextPowerUpSpawnTime = performance.now() + POWERUP_FIRST_DELAY_MS;
   buildCity();
   spawnKittens();
@@ -667,7 +674,7 @@ function spawnPigs(spawner: Hero, count: number): Pig[] {
 }
 
 function trySpawnPowerUp(now: number): void {
-  if (powerUp || now < nextPowerUpSpawnTime) return;
+  if (powerUps.length >= powerUpCap() || now < nextPowerUpSpawnTime) return;
   for (let attempt = 0; attempt < 80; attempt++) {
     const c = 1 + Math.floor(Math.random() * (COLS - 2));
     const r = 1 + Math.floor(Math.random() * (ROWS - 2));
@@ -675,7 +682,11 @@ function trySpawnPowerUp(now: number): void {
     const x = c * TILE + TILE / 2;
     const y = r * TILE + TILE / 2;
     if (players.some((p) => Math.hypot(p.x - x, p.y - y) < 110)) continue;
-    powerUp = { x, y, spawnTime: now };
+    // Don't pile two orbs on top of each other in 2P mode.
+    if (powerUps.some((existing) => Math.hypot(existing.x - x, existing.y - y) < 90)) continue;
+    powerUps.push({ x, y, spawnTime: now });
+    // Schedule the next spawn even if we're not yet at the cap, so 2P fills up faster.
+    nextPowerUpSpawnTime = now + powerUpIntervalMs();
     return;
   }
   // Couldn't place — try again in 2s.
@@ -781,15 +792,20 @@ function updatePlaying(): void {
     p.bounce += Math.hypot(p.vx, p.vy) * 0.08;
   }
 
-  // Power-up pickup — only players without an active power can grab it.
-  if (powerUp) {
+  // Power-up pickup — only players without an active power can grab one.
+  // Iterate backwards so we can splice out collected orbs safely.
+  for (let oi = powerUps.length - 1; oi >= 0; oi--) {
+    const orb = powerUps[oi];
     for (const p of players) {
       if (p.activePower) continue;
       const heroR = HERO_RADIUS * heroSizeMultiplier(p);
-      if (Math.hypot(p.x - powerUp.x, p.y - powerUp.y) < heroR + POWERUP_PICKUP_RADIUS) {
+      if (Math.hypot(p.x - orb.x, p.y - orb.y) < heroR + POWERUP_PICKUP_RADIUS) {
         activatePower(p);
-        powerUp = null;
-        nextPowerUpSpawnTime = now + POWERUP_INTERVAL_MS;
+        powerUps.splice(oi, 1);
+        // If we're now below the cap, schedule a fresh spawn timer.
+        if (powerUps.length < powerUpCap()) {
+          nextPowerUpSpawnTime = now + powerUpIntervalMs();
+        }
         break;
       }
     }
@@ -1180,7 +1196,7 @@ function renderPlaying(): void {
   drawCity();
 
   // Power-up item sits on the ground (under everything else).
-  if (powerUp) drawPowerUp(powerUp);
+  for (const orb of powerUps) drawPowerUp(orb);
 
   // Bitsy trails go under kittens so a saved kitten can vanish cleanly.
   for (const p of players) {
