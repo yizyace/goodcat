@@ -187,6 +187,7 @@ const particles: Particle[] = [];
 let powerUp: PowerUp | null = null;
 let nextPowerUpSpawnTime = 0;
 const POWERUP_INTERVAL_MS = 30_000;
+const POWERUP_FIRST_DELAY_MS = 8_000;
 const POWERUP_PICKUP_RADIUS = 26;
 
 // Power-up durations / parameters per character.
@@ -477,7 +478,9 @@ function startGame(): void {
   scoreEl.textContent = "0";
   particles.length = 0;
   powerUp = null;
-  nextPowerUpSpawnTime = performance.now() + POWERUP_INTERVAL_MS;
+  // First power-up arrives quickly so play feels eventful from the start;
+  // subsequent ones come on the regular 30s cycle.
+  nextPowerUpSpawnTime = performance.now() + POWERUP_FIRST_DELAY_MS;
   buildCity();
   spawnKittens();
   state = "playing";
