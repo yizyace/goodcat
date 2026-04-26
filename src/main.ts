@@ -89,6 +89,9 @@ type Boss = Vec & {
   // Score timing: when the boss appeared, and total ms paused in i-frames.
   spawnTime: number;
   totalInvulnTime: number;
+  // After bumping a wall the boss clips through buildings and gains 1.5x
+  // speed until this timestamp.
+  wallClipUntil: number;
 };
 
 type Pig = Vec & {
@@ -1361,19 +1364,28 @@ function updateBoss(now: number): void {
   if (boss.vx > 0.05) boss.facing = 1;
   else if (boss.vx < -0.05) boss.facing = -1;
 
-  // The boss respects buildings (stays on walkable tiles).
   const inVx = boss.vx;
   const inVy = boss.vy;
-  const m = moveWithCollision(boss, inVx, inVy, BOSS_RADIUS);
-  boss.x = m.x;
-  boss.y = m.y;
-  boss.vx = m.vx;
-  boss.vy = m.vy;
-  const bumpedX = m.vx === 0 && Math.abs(inVx) > 0.05;
-  const bumpedY = m.vy === 0 && Math.abs(inVy) > 0.05;
+  const clipping = now < boss.wallClipUntil;
+  let bumpedX = false;
+  let bumpedY = false;
+  if (clipping) {
+    // Wall-phase: clip through buildings, just clamp to the canvas edges.
+    boss.x = Math.max(BOSS_RADIUS, Math.min(W - BOSS_RADIUS, boss.x + inVx));
+    boss.y = Math.max(BOSS_RADIUS, Math.min(H - BOSS_RADIUS, boss.y + inVy));
+  } else {
+    const m = moveWithCollision(boss, inVx, inVy, BOSS_RADIUS);
+    boss.x = m.x;
+    boss.y = m.y;
+    boss.vx = m.vx;
+    boss.vy = m.vy;
+    bumpedX = m.vx === 0 && Math.abs(inVx) > 0.05;
+    bumpedY = m.vy === 0 && Math.abs(inVy) > 0.05;
+  }
   if (bumpedX || bumpedY) {
-    // On any wall bump, snap immediately to a fresh direction biased AWAY
-    // from the wall so we don't get pinned against geometry.
+    // Hitting a wall enables phase-through + a 1.5x speed boost for 5s.
+    boss.wallClipUntil = now + 5000;
+    // Snap immediately to a fresh direction biased AWAY from the wall.
     const speed = bossCurrentSpeed(boss);
     const dirX = bumpedX
       ? (inVx > 0 ? -1 : 1) * (0.6 + Math.random() * 0.4)
@@ -1390,6 +1402,24 @@ function updateBoss(now: number): void {
     boss.targetVx = nvx;
     boss.targetVy = nvy;
     boss.wanderTimer = 12 + Math.floor(Math.random() * 12);
+    // Brief phase-shift visual cue at the bump location.
+    for (let i = 0; i < 6; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const sp = 1 + Math.random() * 1.6;
+      particles.push({
+        x: boss.x,
+        y: boss.y,
+        vx: Math.cos(angle) * sp,
+        vy: Math.sin(angle) * sp - 0.5,
+        life: 35,
+        maxLife: 35,
+        rot: 0,
+        vrot: 0,
+        scale: 0.6 + Math.random() * 0.4,
+        kind: "sparkle",
+        color: "#a8e6ff",
+      });
+    }
   }
   // Suppress an unused-arg lint warning when we don't actually use `now`.
   void now;
@@ -1430,11 +1460,15 @@ function makeBoss(kind: BossKind): Boss {
     wheelAngle: 0,
     spawnTime: performance.now(),
     totalInvulnTime: 0,
+    wallClipUntil: 0,
   };
 }
 
 function bossCurrentSpeed(b: Boss): number {
-  return BOSS_BASE_SPEED * Math.pow(1.8, b.hitsTaken);
+  let speed = BOSS_BASE_SPEED * Math.pow(1.8, b.hitsTaken);
+  // Wall-phase: 1.5x speed boost while clipping through buildings.
+  if (performance.now() < b.wallClipUntil) speed *= 1.5;
+  return speed;
 }
 
 function tryHitBoss(x: number, y: number, sourceRadius: number): boolean {
@@ -1935,6 +1969,19 @@ function drawBoss(b: Boss): void {
   const now = performance.now();
   if (b.caught) return;
 
+  const clipping = now < b.wallClipUntil;
+  // Faint cyan ghost glow while phasing.
+  if (clipping) {
+    const t = (now / 200) % 1;
+    const glow = ctx.createRadialGradient(b.x, b.y, 4, b.x, b.y, 50);
+    glow.addColorStop(0, `rgba(170, 220, 255, ${0.45 + Math.sin(t * Math.PI * 2) * 0.15})`);
+    glow.addColorStop(1, "rgba(170, 220, 255, 0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 50, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // Sprite-specific render in the boss's local frame.
   ctx.save();
   ctx.translate(b.x, b.y + Math.sin(b.bob) * 2);
@@ -1942,8 +1989,10 @@ function drawBoss(b: Boss): void {
   ctx.scale(1.7, 1.7);
   const invuln = now < b.invulnUntil;
   const flashing = invuln && Math.floor(now / 90) % 2 === 0;
+  if (clipping) ctx.globalAlpha = 0.55 + Math.sin(now / 90) * 0.1;
   if (b.kind === "burglar") drawBurglarSprite(flashing);
   else drawPuppySprite(b, flashing);
+  ctx.globalAlpha = 1;
   ctx.restore();
 
   // Hit indicator: 3 stars above the boss, gold = remaining hits.
