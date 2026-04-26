@@ -12,7 +12,12 @@ const TILE = 64;
 // --- Types ---------------------------------------------------------------
 
 type Vec = { x: number; y: number };
-type GameState = "mode-select" | "character-select" | "playing";
+type GameState =
+  | "mode-select"
+  | "character-select"
+  | "playing"
+  | "intermission"
+  | "score-entry";
 
 type Character = {
   id: string;
@@ -41,6 +46,8 @@ type Kitten = Vec & {
   wiggle: number;
   wanderTimer: number;
   held: boolean;
+  // Performance.now() ms when this kitten started counting down for points.
+  spawnTime: number;
 };
 
 type Hero = Vec & {
@@ -79,6 +86,9 @@ type Boss = Vec & {
   wanderTimer: number;
   // Cumulative wheel rotation for the puppy carriage render.
   wheelAngle: number;
+  // Score timing: when the boss appeared, and total ms paused in i-frames.
+  spawnTime: number;
+  totalInvulnTime: number;
 };
 
 type Pig = Vec & {
@@ -217,6 +227,42 @@ const BOSS_BASE_SPEED = 2.4;
 const BOSS_INVULN_MS = 5_000;
 const BOSS_HITS_TO_CATCH = 3;
 
+// Total levels per game (alternating day/night).
+const MAX_LEVELS = 7;
+
+// Scoring — generous numbers so end-of-game totals feel meaningful.
+const KITTEN_BASE_POINTS = 5_000;
+const KITTEN_DECAY_PER_SEC = 200;
+const KITTEN_MIN_POINTS = 500;
+const BOSS_POINTS_MULTIPLIER = 3;
+const BOSS_BASE_POINTS = KITTEN_BASE_POINTS * BOSS_POINTS_MULTIPLIER;
+const BOSS_DECAY_PER_SEC = KITTEN_DECAY_PER_SEC * BOSS_POINTS_MULTIPLIER;
+const BOSS_MIN_POINTS = KITTEN_MIN_POINTS * BOSS_POINTS_MULTIPLIER;
+
+// Intermission between levels — pause + brief banner before next level starts.
+const INTERMISSION_MS = 2500;
+let intermissionEndsAt = 0;
+let lastLevelScored = 0;
+
+// Floating "+points" callouts so kids see what each catch was worth.
+type FloatingScore = Vec & { amount: number; life: number; maxLife: number };
+const floatingScores: FloatingScore[] = [];
+
+// Score-entry state for end of game.
+type ScoreEntryState = {
+  letters: [string, string, string];
+  cursorPos: 0 | 1 | 2;
+  finalScore: number;
+  isHighScore: boolean;
+  submitted: boolean;
+};
+let scoreEntry: ScoreEntryState | null = null;
+
+type ScoreboardEntry = { name: string; score: number; date: string };
+type Scoreboard = { p1: ScoreboardEntry[]; p2: ScoreboardEntry[] };
+const SCOREBOARD_KEY = "goodcat.scoreboard.v1";
+const SCOREBOARD_LIMIT = 10;
+
 const powerUps: PowerUp[] = [];
 let nextPowerUpSpawnTime = 0;
 const POWERUP_INTERVAL_MS = 30_000;
@@ -297,6 +343,7 @@ function isBlocked(x: number, y: number): boolean {
 
 function spawnKittens(): void {
   kittens.length = 0;
+  const now = performance.now();
   const targets = 6;
   let placed = 0;
   let tries = 0;
@@ -319,6 +366,7 @@ function spawnKittens(): void {
       wiggle: Math.random() * Math.PI * 2,
       wanderTimer: Math.random() * 60,
       held: false,
+      spawnTime: now,
     });
     placed++;
   }
@@ -596,7 +644,9 @@ function startGame(): void {
   scoreEl.textContent = "0";
   particles.length = 0;
   powerUps.length = 0;
+  floatingScores.length = 0;
   level = 1;
+  lastLevelScored = 0;
   applyLevelMode();
   // First power-up arrives quickly so play feels eventful from the start;
   // subsequent ones come on the regular cycle (halved in 2P).
@@ -630,11 +680,37 @@ function heroCatchRadius(h: Hero): number {
   return HERO_RADIUS * heroSizeMultiplier(h);
 }
 
+function pointsForKitten(k: Kitten, now: number): number {
+  const elapsedSec = (now - k.spawnTime) / 1000;
+  const raw = KITTEN_BASE_POINTS - elapsedSec * KITTEN_DECAY_PER_SEC;
+  return Math.max(KITTEN_MIN_POINTS, Math.round(raw));
+}
+
+function pointsForBoss(b: Boss, now: number): number {
+  // Active time only — i-frames are paused for scoring.
+  const activeMs = (now - b.spawnTime) - b.totalInvulnTime;
+  const elapsedSec = Math.max(0, activeMs / 1000);
+  const raw = BOSS_BASE_POINTS - elapsedSec * BOSS_DECAY_PER_SEC;
+  return Math.max(BOSS_MIN_POINTS, Math.round(raw));
+}
+
+function awardPoints(amount: number, atX: number, atY: number): void {
+  score += amount;
+  scoreEl.textContent = score.toLocaleString();
+  floatingScores.push({
+    x: atX,
+    y: atY,
+    amount,
+    life: 70,
+    maxLife: 70,
+  });
+}
+
 function catchKitten(k: Kitten): void {
   if (k.saved) return;
   k.saved = true;
-  score++;
-  scoreEl.textContent = String(score);
+  const now = performance.now();
+  awardPoints(pointsForKitten(k, now), k.x, k.y);
   rescueChime();
   emitRescueBurst(k.x, k.y);
   checkLevelComplete();
@@ -646,7 +722,17 @@ function checkLevelComplete(): void {
   if (boss && !boss.caught) return; // boss must be caught first
   winFanfare();
   stopBeamSound();
-  setTimeout(advanceLevel, 1400);
+  // Reset all active powers + clear power-ups for the transition.
+  for (const p of players) endPower(p);
+  powerUps.length = 0;
+  lastLevelScored = level;
+  if (level >= MAX_LEVELS) {
+    setTimeout(beginScoreEntry, 1800);
+  } else {
+    intermissionEndsAt = performance.now() + INTERMISSION_MS;
+    state = "intermission";
+    setTimeout(advanceLevel, INTERMISSION_MS);
+  }
 }
 
 function activatePower(p: Hero): void {
@@ -736,8 +822,49 @@ function trySpawnPowerUp(now: number): void {
 function update(): void {
   if (state === "mode-select") updateModeSelect();
   else if (state === "character-select") updateCharSelect();
+  else if (state === "intermission") updateIntermission();
+  else if (state === "score-entry") updateScoreEntry();
   else updatePlaying();
   clearJust();
+}
+
+function updateIntermission(): void {
+  // Floating-score particles still drift up during the pause for a nice
+  // "tally" feel, but otherwise the world is frozen.
+  for (const fs of floatingScores) {
+    fs.y -= 0.5;
+    fs.life--;
+  }
+  for (let i = floatingScores.length - 1; i >= 0; i--) {
+    if (floatingScores[i].life <= 0) floatingScores.splice(i, 1);
+  }
+}
+
+function updateScoreEntry(): void {
+  if (!scoreEntry) return;
+  if (!scoreEntry.submitted) {
+    if (consumeJust("arrowup") || consumeJust("w")) {
+      scoreEntry.letters[scoreEntry.cursorPos] =
+        rotateLetter(scoreEntry.letters[scoreEntry.cursorPos], -1);
+    }
+    if (consumeJust("arrowdown") || consumeJust("s")) {
+      scoreEntry.letters[scoreEntry.cursorPos] =
+        rotateLetter(scoreEntry.letters[scoreEntry.cursorPos], 1);
+    }
+    if (consumeJust("arrowleft") || consumeJust("a")) {
+      scoreEntry.cursorPos = Math.max(0, scoreEntry.cursorPos - 1) as 0 | 1 | 2;
+    }
+    if (consumeJust("arrowright") || consumeJust("d")) {
+      scoreEntry.cursorPos = Math.min(2, scoreEntry.cursorPos + 1) as 0 | 1 | 2;
+    }
+    if (consumeJust("enter") || consumeJust(" ")) submitScore();
+  } else {
+    // After submission, ENTER returns to mode-select for a fresh game.
+    if (consumeJust("enter") || consumeJust(" ") || consumeJust("escape")) {
+      scoreEntry = null;
+      state = "mode-select";
+    }
+  }
 }
 
 function updateModeSelect(): void {
@@ -1045,6 +1172,14 @@ function updatePlaying(): void {
   for (let i = particles.length - 1; i >= 0; i--) {
     if (particles[i].life <= 0) particles.splice(i, 1);
   }
+  // Floating "+points" callouts drift up and fade.
+  for (const fs of floatingScores) {
+    fs.y -= 0.7;
+    fs.life--;
+  }
+  for (let i = floatingScores.length - 1; i >= 0; i--) {
+    if (floatingScores[i].life <= 0) floatingScores.splice(i, 1);
+  }
 }
 
 function emitRescueBurst(x: number, y: number): void {
@@ -1094,6 +1229,76 @@ function emitRescueBurst(x: number, y: number): void {
   }
 }
 
+// --- Scoreboard persistence ---------------------------------------------
+
+function loadScoreboard(): Scoreboard {
+  try {
+    const raw = localStorage.getItem(SCOREBOARD_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Scoreboard;
+      if (parsed && Array.isArray(parsed.p1) && Array.isArray(parsed.p2)) {
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore — fall through to fresh board
+  }
+  return { p1: [], p2: [] };
+}
+function saveScoreboard(sb: Scoreboard): void {
+  try {
+    localStorage.setItem(SCOREBOARD_KEY, JSON.stringify(sb));
+  } catch {
+    // best-effort
+  }
+}
+function topScoreFor(modeKind: 1 | 2): number {
+  const sb = loadScoreboard();
+  const list = modeKind === 1 ? sb.p1 : sb.p2;
+  return list.length === 0 ? 0 : list[0].score;
+}
+
+// --- End-of-game / score entry ------------------------------------------
+
+function beginScoreEntry(): void {
+  // Stop everything that loops.
+  for (const p of players) endPower(p);
+  stopBeamSound();
+  scoreEntry = {
+    letters: ["A", "A", "A"],
+    cursorPos: 0,
+    finalScore: score,
+    isHighScore: score > topScoreFor(mode),
+    submitted: false,
+  };
+  // Bring the menu music back for the score-entry screen.
+  resumeThemeMusic();
+  state = "score-entry";
+}
+
+function rotateLetter(c: string, delta: number): string {
+  const code = c.charCodeAt(0) - 65; // 'A' = 0
+  const next = (code + delta + 26) % 26;
+  return String.fromCharCode(65 + next);
+}
+
+function submitScore(): void {
+  if (!scoreEntry || scoreEntry.submitted) return;
+  const sb = loadScoreboard();
+  const list = mode === 1 ? sb.p1 : sb.p2;
+  const date = new Date().toISOString().slice(0, 10);
+  list.push({
+    name: scoreEntry.letters.join(""),
+    score: scoreEntry.finalScore,
+    date,
+  });
+  list.sort((a, b) => b.score - a.score);
+  if (list.length > SCOREBOARD_LIMIT) list.length = SCOREBOARD_LIMIT;
+  if (mode === 1) sb.p1 = list; else sb.p2 = list;
+  saveScoreboard(sb);
+  scoreEntry.submitted = true;
+}
+
 function applyLevelMode(): void {
   // Even-numbered levels are night.
   isNight = level % 2 === 0;
@@ -1106,6 +1311,14 @@ function advanceLevel(): void {
   spawnKittens();
   // Day = Mr. Puppypaws, Night = the Cat Burglar.
   boss = makeBoss(isNight ? "burglar" : "puppy");
+  // Make sure transient gameplay state is fully reset for the new level.
+  for (const p of players) endPower(p);
+  powerUps.length = 0;
+  particles.length = 0;
+  floatingScores.length = 0;
+  // Auto-spawn one fresh power-up the moment the level begins.
+  nextPowerUpSpawnTime = performance.now();
+  state = "playing";
 }
 
 function updateBoss(now: number): void {
@@ -1215,6 +1428,8 @@ function makeBoss(kind: BossKind): Boss {
     caught: false,
     wanderTimer: 0,
     wheelAngle: 0,
+    spawnTime: performance.now(),
+    totalInvulnTime: 0,
   };
 }
 
@@ -1232,13 +1447,14 @@ function tryHitBoss(x: number, y: number, sourceRadius: number): boolean {
   boss.hitsTaken++;
   if (boss.hitsTaken >= BOSS_HITS_TO_CATCH) {
     boss.caught = true;
-    score += 5; // bonus for catching the bad guy
-    scoreEl.textContent = String(score);
+    awardPoints(pointsForBoss(boss, now), boss.x, boss.y);
     emitBossCaughtBurst(boss.x, boss.y);
     rescueChime();
     checkLevelComplete();
   } else {
     boss.invulnUntil = now + BOSS_INVULN_MS;
+    // Pause scoring decay for the entire i-frame window.
+    boss.totalInvulnTime += BOSS_INVULN_MS;
     emitBossHitBurst(boss.x, boss.y);
     // Visible bump in the direction the boss was facing away from the hit.
     const dx = boss.x - x;
@@ -1307,7 +1523,146 @@ function emitBossCaughtBurst(x: number, y: number): void {
 function render(): void {
   if (state === "mode-select") renderModeSelect();
   else if (state === "character-select") renderCharSelect();
+  else if (state === "intermission") {
+    renderPlaying();
+    renderIntermissionOverlay();
+  } else if (state === "score-entry") renderScoreEntry();
   else renderPlaying();
+}
+
+function renderIntermissionOverlay(): void {
+  const remaining = intermissionEndsAt - performance.now();
+  const alpha = Math.min(0.7, Math.max(0.3, remaining / INTERMISSION_MS));
+  ctx.fillStyle = `rgba(15, 8, 30, ${alpha})`;
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Day-to-night uses a moon icon, night-to-day uses a sun icon.
+  // We just transitioned FROM the level we just finished; show that level
+  // wrapped, and tease the next mode by checking the next-level parity.
+  const nextLevel = lastLevelScored + 1;
+  const nextIsNight = nextLevel % 2 === 0;
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 56px system-ui";
+  ctx.fillText(`Level ${lastLevelScored} cleared!`, W / 2, H / 2 - 30);
+  ctx.fillStyle = "#ffd0e8";
+  ctx.font = "bold 28px system-ui";
+  ctx.fillText(
+    nextIsNight ? "Night falls… 🌙" : "A new day dawns… ☀️",
+    W / 2,
+    H / 2 + 30,
+  );
+}
+
+function renderScoreEntry(): void {
+  drawTitleBackground();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 48px system-ui";
+  ctx.fillText("GAME OVER", W / 2, 70);
+
+  const finalScore = scoreEntry?.finalScore ?? score;
+  ctx.font = "bold 28px system-ui";
+  ctx.fillStyle = "#ffd0e8";
+  ctx.fillText(`Final score: ${finalScore.toLocaleString()}`, W / 2, 120);
+
+  if (scoreEntry?.isHighScore) {
+    const t = performance.now() / 200;
+    const wobble = 1 + Math.sin(t) * 0.05;
+    ctx.save();
+    ctx.translate(W / 2, 175);
+    ctx.scale(wobble, wobble);
+    ctx.fillStyle = "#ffd54f";
+    ctx.font = "bold 36px system-ui";
+    ctx.fillText("✨ NEW HIGH SCORE! ✨", 0, 0);
+    ctx.restore();
+  }
+
+  if (scoreEntry && !scoreEntry.submitted) {
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 24px system-ui";
+    ctx.fillText("Enter your initials:", W / 2, 240);
+    // Letter slots.
+    const slotW = 70;
+    const totalW = slotW * 3 + 20;
+    const startX = (W - totalW) / 2;
+    for (let i = 0; i < 3; i++) {
+      const cx = startX + i * (slotW + 10) + slotW / 2;
+      const cy = 310;
+      // Box.
+      const selected = scoreEntry.cursorPos === i;
+      ctx.fillStyle = selected ? "#ff5fb0" : "rgba(255,255,255,0.12)";
+      roundRect(cx - slotW / 2, cy - 40, slotW, 80, 12);
+      ctx.fill();
+      if (selected) {
+        ctx.strokeStyle = "#ffd54f";
+        ctx.lineWidth = 4;
+        roundRect(cx - slotW / 2, cy - 40, slotW, 80, 12);
+        ctx.stroke();
+      }
+      // Letter.
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 56px system-ui";
+      ctx.fillText(scoreEntry.letters[i], cx, cy);
+      // Up/down arrow hints on selected slot.
+      if (selected) {
+        ctx.fillStyle = "#ffd54f";
+        ctx.font = "bold 18px system-ui";
+        ctx.fillText("▲", cx, cy - 56);
+        ctx.fillText("▼", cx, cy + 56);
+      }
+    }
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px system-ui";
+    ctx.fillText("← → move  ·  ↑ ↓ change letter  ·  ENTER save", W / 2, 420);
+  }
+
+  // Scoreboard panel below.
+  const sb = loadScoreboard();
+  const list = mode === 1 ? sb.p1 : sb.p2;
+  ctx.fillStyle = "#ffd0e8";
+  ctx.font = "bold 22px system-ui";
+  ctx.fillText(`${mode === 1 ? "1-Player" : "2-Player"} Top Scores`, W / 2, 470);
+
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  roundRect(W / 2 - 240, 490, 480, 120, 12);
+  ctx.fill();
+
+  ctx.font = "16px system-ui";
+  ctx.textAlign = "left";
+  const top = list.slice(0, 5);
+  if (top.length === 0) {
+    ctx.fillStyle = "#bbb";
+    ctx.textAlign = "center";
+    ctx.fillText("(no scores yet — be the first!)", W / 2, 550);
+  } else {
+    for (let i = 0; i < top.length; i++) {
+      const e = top[i];
+      const y = 510 + i * 22;
+      const justSubmitted =
+        scoreEntry?.submitted &&
+        e.score === scoreEntry.finalScore &&
+        e.name === scoreEntry.letters.join("");
+      ctx.fillStyle = justSubmitted ? "#ffd54f" : "#fff";
+      ctx.fillText(`${i + 1}.`, W / 2 - 220, y);
+      ctx.fillText(e.name, W / 2 - 180, y);
+      ctx.textAlign = "right";
+      ctx.fillText(e.score.toLocaleString(), W / 2 + 70, y);
+      ctx.textAlign = "left";
+      ctx.fillStyle = justSubmitted ? "#ffd54f" : "#bbb";
+      ctx.fillText(e.date, W / 2 + 100, y);
+      ctx.textAlign = "left";
+    }
+  }
+  ctx.textAlign = "center";
+
+  if (scoreEntry?.submitted) {
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px system-ui";
+    ctx.fillText("Press ENTER to play again", W / 2, H - 40);
+  }
 }
 
 function drawTitleBackground(): void {
@@ -1490,6 +1845,7 @@ function renderPlaying(): void {
   }
 
   for (const pr of particles) drawParticle(pr);
+  for (const fs of floatingScores) drawFloatingScore(fs);
 
   if (mode === 2) {
     for (const p of players) {
@@ -1818,6 +2174,19 @@ function drawPuppySprite(b: Boss, flashing: boolean): void {
   ctx.fill();
   ctx.fillStyle = "#a32b3a";
   ctx.fillRect(6, 6, 2, 3);
+}
+
+function drawFloatingScore(fs: FloatingScore): void {
+  const a = Math.min(1, fs.life / fs.maxLife);
+  ctx.font = "bold 18px system-ui";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = `rgba(255, 220, 100, ${a})`;
+  ctx.strokeStyle = `rgba(60, 30, 0, ${a})`;
+  ctx.lineWidth = 3;
+  const text = `+${fs.amount.toLocaleString()}`;
+  ctx.strokeText(text, fs.x, fs.y);
+  ctx.fillText(text, fs.x, fs.y);
 }
 
 function drawTinyStar(cx: number, cy: number, filled: boolean): void {
